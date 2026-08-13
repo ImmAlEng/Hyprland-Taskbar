@@ -1,0 +1,22 @@
+[module]
+name = "workspace-tiles"
+type = "custom"
+description = "Four inactive workspace tiles with live application icons."
+
+[dependencies]
+commands = ["hyprctl", "python3", "magick"]
+
+[dependencies.arch]
+packages = [
+    "hyprland",
+    "python",
+    "python-gobject",
+    "gtk3",
+    "imagemagick",
+]
+
+[dependencies.arch.optional]
+packages = ["papirus-icon-theme"]
+
+[platform]
+linux_proc = true

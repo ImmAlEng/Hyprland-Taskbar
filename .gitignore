@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+waybar/config.jsonc
+waybar/generated.css
+
+.cache/
+*.log

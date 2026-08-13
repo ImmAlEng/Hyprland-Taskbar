@@ -1,0 +1,6 @@
+# Hypr Sidebar - visible module arrangement
+
+[page.main]
+
+[[page.main.block]]
+modules = ["current-workspace"]

@@ -1,0 +1,13 @@
+# Hypr Sidebar - monitor policy
+
+[monitors]
+mode = "auto"
+max_slots = 4
+
+# Optional explicit overrides:
+#
+# [monitor."DP-1"]
+# slot = 1
+#
+# [monitor."DP-2"]
+# slot = 2

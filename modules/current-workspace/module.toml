@@ -1,0 +1,20 @@
+[module]
+name = "current-workspace"
+version = 1
+description = "Displays the active workspace. This can later become the workspace overview button."
+style = "style.css"
+
+[dependencies]
+commands = ["hyprctl", "python3"]
+
+[dependencies.arch]
+packages = ["hyprland", "python"]
+
+[waybar]
+root = "custom/current-workspace"
+
+[waybar.entries."custom/current-workspace"]
+exec = "\"{python}\" \"{module_dir}/scripts/current-workspace.py\" \"{monitor}\""
+interval = 1
+format = "{}"
+tooltip = false

@@ -1,0 +1,45 @@
+@import "generated.css";
+
+/*
+ * Hypr Sidebar - core stylesheet.
+ * Structure only. Concrete values are generated from config/waybar.toml.
+ */
+
+* {
+    border: none;
+    margin: 0;
+    padding: 0;
+    font-family: monospace;
+}
+
+window#waybar {
+    background: transparent;
+}
+
+/* Core layout primitives */
+
+.hypr-sidebar-block {
+    padding: 0;
+}
+
+.hypr-sidebar-row {
+    padding: 0;
+}
+
+.hypr-sidebar-module {
+    padding: 0;
+}
+
+/* Shared interaction states */
+
+.hypr-sidebar-button {
+    border-radius: 6px;
+}
+
+.hypr-sidebar-button:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+/*
+ * Module-specific CSS does not belong here.
+ */

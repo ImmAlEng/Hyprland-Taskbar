@@ -1,0 +1,60 @@
+# Hypr Sidebar - core Waybar configuration
+# Controls the sidebar itself, not individual modules.
+
+[bar]
+position = "right"
+layer = "top"
+exclusive = true
+
+margin_top = 10
+margin_bottom = 10
+margin_left = 0
+margin_right = 0
+
+[bar.width]
+# Sidebar width is derived from the monitor's logical height.
+#
+# This keeps the sidebar visually consistent across different
+# aspect ratios such as 16:9, 16:10, 21:9, 24:10 and 32:9.
+#
+# Current reference values:
+#   1080 logical px -> 192 px sidebar
+#   1440 logical px -> 256 px sidebar
+#
+# Formula:
+#   sidebar_width = logical_height * ratio
+
+mode = "height-ratio"
+ratio = 0.1777777778
+
+# Optional safety limits for unusually small or large displays.
+min_pixels = 160
+max_pixels = 420
+
+# Future modes:
+# mode = "fixed"
+pixels = 256
+# mode = "percent"
+percent = 10.0
+
+[bar.border]
+width = 4
+radius = 10
+
+[spacing]
+edge = 10
+module = 10
+row = 4
+column = 4
+
+[font]
+family = "monospace"
+mode = "dynamic"
+reference_height_1 = 1080
+reference_size_1 = 14.0
+reference_height_2 = 1440
+reference_size_2 = 16.0
+
+[theme]
+background = "rgba(15, 15, 15, 0.90)"
+border = "rgba(95, 100, 103, 0.75)"
