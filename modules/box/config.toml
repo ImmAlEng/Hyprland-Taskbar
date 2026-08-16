@@ -1,0 +1,15 @@
+# box
+#
+# Required placement parameter:
+# child -> one wrapped module placement
+#
+# Optional placement parameters:
+# border -> border thickness in pixels
+#           default: max(1, round(core border * 0.25))
+#           explicit 0 disables the border
+# radius -> border radius in pixels; omitted by default
+# click  -> executable path; omitted by default
+#
+# Example:
+# { module = "box", border = 1, radius = 8,
+#   child = { module = "textbox", text = "Hello" } }

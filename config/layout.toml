@@ -1,6 +1,81 @@
-# Hypr Sidebar - visible module arrangement
+# Hypr Sidebar - textbox placement parameter test
+
+[layout]
+draw_margin_fraction = 0.04
+pad_y = 13
 
 [page.main]
 
 [[page.main.block]]
-modules = ["current-workspace"]
+modules = ["color-block:green"]
+height = 20
+
+[[page.main.block]]
+modules = [
+    { module = "color-block:red", overwrite_pad_x = 15 },
+    { module = "textbox", text = "hello", overwrite_pad_x = 20 },
+    "color-block:blue",
+]
+item_widths_percent = [25, 70, 5]
+height = 25
+
+[[page.main.block]]
+modules = ["color-block:yellow"]
+height = 15
+
+[[page.main.block]]
+modules = [
+    { module = "textbox", text = "goodbye" },
+]
+height = 30
+
+[[page.main.block]]
+modules = [
+    { module = "textbox", text = "bigger font", font_size = 22 },
+]
+height = 35
+
+[[page.main.block]]
+modules = [
+    { module = "textbox", text = "smaller font", font_size = 10 },
+]
+height = 20
+
+[[page.main.block]]
+modules = [
+    { module = "textbox", text = "right aligned", alignment = "right" },
+]
+height = 30
+
+[[page.main.block]]
+modules = [
+    { module = "textbox", text = "left aligned", alignment = "left" },
+]
+height = 30
+
+[[page.main.block]]
+modules = [
+    { module = "textbox", text = "different font", font = "serif" },
+]
+height = 30
+
+[[page.main.block]]
+modules = [
+    { module = "textbox", text = "red", color = "#ff0000" },
+]
+height = 30
+
+[[page.main.block]]
+modules = [
+    { module = "textbox", text = "left" },
+    { module = "empty" },
+    { module = "textbox", text = "right" },
+]
+item_widths_percent = [45, 10, 45]
+height = 30
+
+[[page.main.block]]
+modules = [
+    { module = "box", click = "~/.config/hypr-sidebar/test.sh", border = 3, child = { module = "textbox", text = "boxed" } },
+]
+height = 30

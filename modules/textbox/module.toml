@@ -1,0 +1,13 @@
+[module]
+name = "textbox"
+version = 1
+description = "Static text rendered inside a layout-owned rectangle."
+
+[generator]
+entrypoint = "scripts/generate.py"
+
+[dependencies]
+commands = ["python3"]
+
+[dependencies.arch]
+packages = ["python", "python-gobject", "pango"]

@@ -1,0 +1,14 @@
+[module]
+name = "box"
+version = 1
+description = "Border wrapper around one child module."
+
+[generator]
+entrypoint = "scripts/generate.py"
+child_parameter = "child"
+
+[dependencies]
+commands = ["python3"]
+
+[dependencies.arch]
+packages = ["python"]

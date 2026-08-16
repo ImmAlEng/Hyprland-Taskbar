@@ -1,7 +1,8 @@
 /*
  * current-workspace
  *
- * Module-local styling only.
+ * Module-local invariant styling only.
+ * Configurable appearance is generated from config.toml.
  */
 
 #custom-current-workspace {

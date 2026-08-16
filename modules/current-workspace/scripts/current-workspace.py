@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the active workspace for one Hyprland monitor."""
+"""Print the active workspace number for one Hyprland monitor."""
 
 from __future__ import annotations
 
@@ -41,10 +41,11 @@ def main() -> int:
             continue
 
         workspace = monitor.get("activeWorkspace", {}).get("id")
+
         if workspace is None:
             return 1
 
-        print(f"Workspace - {workspace}")
+        print(workspace)
         return 0
 
     print(f"monitor not found: {monitor_name}", file=sys.stderr)

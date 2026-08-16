@@ -6,10 +6,7 @@ position = "right"
 layer = "top"
 exclusive = true
 
-margin_top = 10
-margin_bottom = 10
-margin_left = 0
-margin_right = 0
+# Vertical margins are inherited from Hyprland general.gaps_out.
 
 [bar.width]
 # Sidebar width is derived from the monitor's logical height.
@@ -37,13 +34,8 @@ pixels = 256
 # mode = "percent"
 percent = 10.0
 
-[bar.border]
-width = 4
-radius = 10
-
 [spacing]
-edge = 10
-module = 10
+layout = 10
 row = 4
 column = 4
 

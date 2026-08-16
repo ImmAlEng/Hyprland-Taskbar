@@ -1,0 +1,13 @@
+# color-block instances
+
+[instance.red]
+color = "#ff0000"
+
+[instance.blue]
+color = "#0000ff"
+
+[instance.green]
+color = "#00ff00"
+
+[instance.yellow]
+color = "#ffff00"

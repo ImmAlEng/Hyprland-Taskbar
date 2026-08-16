@@ -1,0 +1,24 @@
+Workspace Tiles flexible migration
+
+This bundle replaces the fixed 2x2 workspace-tiles prototype.
+
+Simplifications in this revision:
+- tile count is derived from the workspace list
+- row count is derived from tile count and columns
+- columns means maximum tiles per row
+- max_visible = 0 means all inactive assigned workspaces
+- the old workspace-slot.sh helper is no longer needed
+- one Python runtime resolves inactive workspaces and performs clicks
+
+The existing workspace-icons.py is intentionally not replaced because the local
+working copy contains application/TUI/icon behavior that should be preserved.
+Copy it into the module before running the dry-run:
+
+  cp ~/.config/waybar/scripts/workspace-icons.py \
+     ~/.config/hypr-sidebar/modules/workspace-tiles/scripts/
+
+Then make the scripts executable and run:
+
+  chmod +x ~/.config/hypr-sidebar/modules/workspace-tiles/scripts/*.py
+  cd ~/.config/hypr-sidebar
+  ./scripts/generate.py --dry-run

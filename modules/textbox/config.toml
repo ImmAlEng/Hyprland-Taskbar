@@ -1,0 +1,11 @@
+# textbox
+#
+# Placement parameters:
+# text       -> defaults to "Textbox"
+# font       -> inherits the core font family
+# font_size  -> inherits the monitor-aware core font size
+# alignment  -> defaults to "center"
+# color      -> defaults to "#ffffff"
+#
+# Example:
+# { module = "textbox", text = "Hello", alignment = "center", color = "#ffffff" }

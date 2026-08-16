@@ -196,3 +196,69 @@ In `explicit` mode, active outputs without a configured slot are ignored.
 The core does not attach any workspace or module-specific meaning to a slot.
 Modules receive the assigned value through `{monitor_slot}` and may interpret
 it according to their own configuration.
+
+
+## Generated modules
+
+Static modules declare `[waybar]` entries directly in `module.toml`.
+
+Complex modules may instead declare a generator:
+
+```toml
+[generator]
+entrypoint = "scripts/generate.py"
+```
+
+A module must define exactly one of `[waybar]` or `[generator]`.
+
+The core runs a generated module once per active monitor and passes a JSON object
+on standard input. The context contains only generic core metadata:
+
+```text
+contract_version
+
+project_root
+module_dir
+
+monitor.name
+monitor.css
+monitor.slot
+monitor.logical_width
+monitor.logical_height
+monitor.scale
+
+bar.width
+bar.position
+bar.border_width
+bar.border_radius
+
+spacing.edge
+spacing.module
+spacing.row
+spacing.column
+
+font.size
+```
+
+The generator must write one JSON object to standard output:
+
+```json
+{
+  "root": "group/example",
+  "entries": {
+    "group/example": {
+      "orientation": "horizontal",
+      "modules": ["custom/example-child"]
+    },
+    "custom/example-child": {
+      "format": "example"
+    }
+  },
+  "css": "optional monitor-specific CSS"
+}
+```
+
+`root` must refer to an entry in `entries`.
+
+This hook is intended for modules whose internal Waybar structure or geometry
+depends on monitor context. The core still does not know what the module does.

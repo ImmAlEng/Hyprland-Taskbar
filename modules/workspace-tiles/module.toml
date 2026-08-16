@@ -1,7 +1,11 @@
 [module]
 name = "workspace-tiles"
-type = "custom"
-description = "Four inactive workspace tiles with live application icons."
+version = 1
+description = "Flexible inactive workspace grid with live application icons."
+style = "style.css"
+
+[generator]
+entrypoint = "scripts/generate.py"
 
 [dependencies]
 commands = ["hyprctl", "python3", "magick"]

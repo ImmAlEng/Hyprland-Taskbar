@@ -1,0 +1,13 @@
+[module]
+name = "empty"
+version = 1
+description = "Invisible layout spacer that occupies its allocated rectangle."
+
+[generator]
+entrypoint = "scripts/generate.py"
+
+[dependencies]
+commands = ["python3"]
+
+[dependencies.arch]
+packages = ["python"]

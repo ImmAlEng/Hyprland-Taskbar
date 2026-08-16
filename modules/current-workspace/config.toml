@@ -1,0 +1,17 @@
+# Current Workspace module configuration
+
+[display]
+# Text shown by the module. {workspace} is replaced by the active workspace number.
+text = "Workspace - {workspace}"
+color = "#cccccc"
+font_family = "monospace"
+
+# Optional fixed font-size override in pixels.
+# When omitted, the module inherits the core monitor-aware font size.
+# font_size =
+
+[runtime]
+refresh_interval = 1
+
+[action]
+script = "scripts/test.sh"
