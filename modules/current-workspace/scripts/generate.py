@@ -103,6 +103,16 @@ def main() -> int:
 
         if font_size <= 0:
             fail("display.font_size must be greater than zero")
+
+    block_width = layout.get("width")
+
+    if block_width is not None:
+        if isinstance(block_width, bool) or not isinstance(block_width, int):
+            fail("layout width must be an integer")
+
+        if block_width <= 0:
+            fail("layout width must be greater than zero")
+
     block_height = layout.get("height")
 
     if block_height is not None:
@@ -144,7 +154,7 @@ def main() -> int:
 
     selector = (
         f"window#waybar.sidebar-{monitor_css} "
-            "#custom-current-workspace"
+        "#custom-current-workspace"
     )
 
     css_lines = [
@@ -154,11 +164,14 @@ def main() -> int:
         f"    font-family: {css_string(font_family)};",
     ]
 
-    # Deliberately omit font-size when no override is configured.
-    # The module then inherits the monitor-aware size from the core.
+    if block_width is not None:
+        css_lines.append(f"    min-width: {block_width}px;")
+
     if block_height is not None:
         css_lines.append(f"    min-height: {block_height}px;")
 
+    # Deliberately omit font-size when no override is configured.
+    # The module then inherits the monitor-aware size from the core.
     if font_size is not None:
         css_lines.append(f"    font-size: {font_size:g}px;")
 
@@ -169,6 +182,8 @@ def main() -> int:
         "interval": interval,
         "format": format_text,
         "tooltip": False,
+        "align": 0.5,
+        "justify": "center",
     }
 
     if click_command is not None:

@@ -1,0 +1,13 @@
+[module]
+name = "clock"
+version = 1
+description = "Date and time display using Waybar's built-in clock."
+
+[generator]
+entrypoint = "scripts/generate.py"
+
+[dependencies]
+commands = ["python3"]
+
+[dependencies.arch]
+packages = ["python"]

@@ -1,0 +1,14 @@
+[display]
+unmuted_color = "#ffffff"
+muted_color = "#ff0000"
+
+[display.sink]
+unmuted_icon = ""
+muted_icon = ""
+
+[display.source]
+unmuted_icon = ""
+muted_icon = ""
+
+[runtime]
+refresh_interval = 1

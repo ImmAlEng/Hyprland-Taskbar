@@ -1,0 +1,7 @@
+[module]
+name = "volume-slider"
+version = 1
+description = "Waybar built-in PulseAudio volume slider."
+
+[generator]
+entrypoint = "scripts/generate.py"

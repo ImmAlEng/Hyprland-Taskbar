@@ -1,0 +1,13 @@
+[module]
+name = "audio-toggle"
+version = 1
+description = "PipeWire sink/source mute state and toggle control."
+
+[generator]
+entrypoint = "scripts/generate.py"
+
+[dependencies]
+commands = ["python3", "wpctl"]
+
+[dependencies.arch]
+packages = ["python", "wireplumber"]

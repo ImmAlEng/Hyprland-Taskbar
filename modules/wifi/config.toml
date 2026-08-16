@@ -1,0 +1,8 @@
+[display]
+wifi_icon = ""
+ethernet_icon = "🖧"
+connected_color = "#ffffff"
+disconnected_color = "#ff0000"
+
+[runtime]
+refresh_interval = 2

@@ -1,0 +1,16 @@
+# Hypr Sidebar application aliases.
+#
+# Commands are resolved through PATH at generation time.
+# Keep each command to one executable for now.
+
+[app.file_manager]
+command = "thunar"
+
+[app.bluetooth]
+command = "blueman-manager"
+
+[app.network_manager]
+command = "nm-connection-editor"
+
+[app.audio]
+command = "pavucontrol"

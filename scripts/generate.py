@@ -6,7 +6,7 @@ Core responsibilities:
 - read global TOML configuration
 - discover active Hyprland monitors
 - calculate monitor-specific bar geometry
-- read layout rows and nested col containers
+- load an independent layout TOML for each active monitor slot
 - load module manifests
 - expand module templates
 - generate Waybar config.jsonc
@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,12 @@ class LayoutModule:
     instance: str | None = None
     overwrite_pad_x: int | None = None
     overwrite_pad_y: int | None = None
+    width: int | None = None
+    width_percent: float | None = None
+    width_remaining: bool = False
+    height: int | None = None
+    height_percent: float | None = None
+    height_remaining: bool = False
     parameters: dict[str, Any] | None = None
 
     @property
@@ -102,6 +109,12 @@ class LayoutColumn:
     item_heights_percent: tuple[float, ...] | None = None
     overwrite_pad_x: int | None = None
     overwrite_pad_y: int | None = None
+    width: int | None = None
+    width_percent: float | None = None
+    width_remaining: bool = False
+    height: int | None = None
+    height_percent: float | None = None
+    height_remaining: bool = False
 
 
 LayoutItem = LayoutModule | LayoutColumn
@@ -113,10 +126,19 @@ class LayoutBlock:
     modules: tuple[LayoutItem, ...]
     width: int | None
     height: int | None
-    height_fraction: float | None
+    height_percent: float | None
+    height_remaining: bool
     item_widths_percent: tuple[float, ...] | None
     item_heights_percent: tuple[float, ...] | None
     overwrite_pad_y: int | None
+
+
+@dataclass(frozen=True)
+class SlotLayout:
+    slot: int
+    path: Path
+    config: dict[str, Any]
+    blocks: tuple[LayoutBlock, ...]
 
 
 def parse_args() -> argparse.Namespace:
@@ -145,6 +167,106 @@ def load_toml(path: Path) -> dict[str, Any]:
         raise SystemExit(f"Missing configuration file: {path}")
     except tomllib.TOMLDecodeError as exc:
         raise SystemExit(f"Invalid TOML in {path}: {exc}")
+
+
+
+def load_app_commands(config: dict[str, Any]) -> dict[str, str]:
+    """Load semantic application aliases from config/apps.toml."""
+    raw_apps = config.get("app", {})
+
+    if not isinstance(raw_apps, dict):
+        raise SystemExit("apps.toml [app] must be a table.")
+
+    commands: dict[str, str] = {}
+
+    for name, raw_entry in raw_apps.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise SystemExit(
+                f"apps.toml contains invalid app name {name!r}; "
+                "use letters, numbers, '_' or '-'."
+            )
+
+        if not isinstance(raw_entry, dict):
+            raise SystemExit(
+                f"apps.toml [app.{name}] must be a table."
+            )
+
+        raw_command = raw_entry.get("command")
+        if not isinstance(raw_command, str) or not raw_command.strip():
+            raise SystemExit(
+                f"apps.toml [app.{name}] command must be a non-empty string."
+            )
+
+        command = raw_command.strip()
+
+        # Keep app aliases intentionally simple for now: one executable,
+        # no shell fragments or arguments.
+        if any(char.isspace() for char in command):
+            raise SystemExit(
+                f"apps.toml [app.{name}] command must be one executable "
+                "without arguments."
+            )
+
+        candidate = Path(command).expanduser()
+
+        if candidate.is_absolute():
+            if not candidate.is_file():
+                raise SystemExit(
+                    f"apps.toml [app.{name}] executable does not exist: "
+                    f"{candidate}"
+                )
+            resolved = str(candidate.resolve())
+        else:
+            found = shutil.which(command)
+            if found is None:
+                raise SystemExit(
+                    f"apps.toml [app.{name}] executable was not found in PATH: "
+                    f"{command}"
+                )
+            resolved = str(Path(found).resolve())
+
+        commands[name] = resolved
+
+    return commands
+
+
+def resolve_app_alias(value: str, app_commands: dict[str, str], context: str) -> str:
+    """Resolve app:<name> into the configured executable path."""
+    if not value.startswith("app:"):
+        return value
+
+    name = value[4:]
+    if not name:
+        raise SystemExit(f"{context} contains empty app: reference.")
+
+    command = app_commands.get(name)
+    if command is None:
+        available = ", ".join(sorted(app_commands)) or "(none)"
+        raise SystemExit(
+            f"{context} references unknown app alias '{name}'. "
+            f"Configured aliases: {available}."
+        )
+
+    return command
+
+
+def resolve_placement_app_aliases(
+    parameters: dict[str, Any],
+    app_commands: dict[str, str],
+    context: str,
+) -> dict[str, Any]:
+    """Resolve direct placement string parameters that use app:<name>."""
+    resolved = dict(parameters)
+
+    for key, value in parameters.items():
+        if isinstance(value, str) and value.startswith("app:"):
+            resolved[key] = resolve_app_alias(
+                value,
+                app_commands,
+                f"{context} parameter '{key}'",
+            )
+
+    return resolved
 
 
 def required(mapping: dict[str, Any], key: str, context: str) -> Any:
@@ -632,10 +754,101 @@ def parse_layout_module_reference(value: str, context: str) -> tuple[str, str | 
     return name, instance
 
 
+
+def parse_axis_allocation(
+    mapping: dict[str, Any],
+    axis: str,
+    context: str,
+) -> tuple[int | None, float | None, bool]:
+    """Parse px, percent, or remaining allocation for one axis."""
+    raw_size = mapping.get(axis)
+    raw_percent = mapping.get(f"{axis}_percent")
+
+    pixels: int | None = None
+    percent: float | None = None
+    remaining = False
+
+    if raw_size is not None:
+        if isinstance(raw_size, str):
+            if raw_size != "remaining":
+                raise SystemExit(
+                    f'{context} {axis} string value must be "remaining".'
+                )
+            remaining = True
+        else:
+            if isinstance(raw_size, bool) or not isinstance(raw_size, int):
+                raise SystemExit(
+                    f'{context} {axis} must be a positive integer or "remaining".'
+                )
+            if raw_size <= 0:
+                raise SystemExit(
+                    f"{context} {axis} must be greater than zero."
+                )
+            pixels = raw_size
+
+    if raw_percent is not None:
+        if (
+            isinstance(raw_percent, bool)
+            or not isinstance(raw_percent, (int, float))
+        ):
+            raise SystemExit(
+                f"{context} {axis}_percent must be a number."
+            )
+
+        percent = float(raw_percent)
+        if percent <= 0 or percent > 100:
+            raise SystemExit(
+                f"{context} {axis}_percent must be greater than 0 "
+                "and at most 100."
+            )
+
+    mode_count = (
+        int(pixels is not None)
+        + int(percent is not None)
+        + int(remaining)
+    )
+
+    if mode_count > 1:
+        raise SystemExit(
+            f"{context} may set only one of {axis}=<px>, "
+            f'{axis}_percent=<percent>, or {axis}="remaining".'
+        )
+
+    return pixels, percent, remaining
+
+
+def has_axis_allocation(item: LayoutItem, axis: str) -> bool:
+    return bool(
+        getattr(item, axis) is not None
+        or getattr(item, f"{axis}_percent") is not None
+        or getattr(item, f"{axis}_remaining")
+    )
+
+
+def describe_axis_allocation(item: LayoutItem, axis: str) -> str | None:
+    pixels = getattr(item, axis)
+    percent = getattr(item, f"{axis}_percent")
+    remaining = getattr(item, f"{axis}_remaining")
+
+    if pixels is not None:
+        return f"{pixels}px"
+    if percent is not None:
+        return f"{percent:g}%"
+    if remaining:
+        return "remaining"
+    return None
+
+
 def parse_layout_module(value: Any, context: str) -> LayoutModule:
     """Parse a short module reference or an explicit module placement."""
     overwrite_pad_x: int | None = None
     overwrite_pad_y: int | None = None
+    width: int | None = None
+    width_percent: float | None = None
+    width_remaining = False
+    height: int | None = None
+    height_percent: float | None = None
+    height_remaining = False
     parameters: dict[str, Any] = {}
 
     if isinstance(value, str):
@@ -681,10 +894,29 @@ def parse_layout_module(value: Any, context: str) -> LayoutModule:
 
             overwrite_pad_y = raw_overwrite_pad_y
 
+        width, width_percent, width_remaining = parse_axis_allocation(
+            value,
+            "width",
+            context,
+        )
+        height, height_percent, height_remaining = parse_axis_allocation(
+            value,
+            "height",
+            context,
+        )
+
         parameters = {
             str(key): item
             for key, item in value.items()
-            if key not in {"module", "overwrite_pad_x", "overwrite_pad_y"}
+            if key not in {
+                "module",
+                "overwrite_pad_x",
+                "overwrite_pad_y",
+                "width",
+                "width_percent",
+                "height",
+                "height_percent",
+            }
         }
     else:
         raise SystemExit(
@@ -698,6 +930,12 @@ def parse_layout_module(value: Any, context: str) -> LayoutModule:
         instance=instance,
         overwrite_pad_x=overwrite_pad_x,
         overwrite_pad_y=overwrite_pad_y,
+        width=width,
+        width_percent=width_percent,
+        width_remaining=width_remaining,
+        height=height,
+        height_percent=height_percent,
+        height_remaining=height_remaining,
         parameters=parameters,
     )
 
@@ -709,6 +947,10 @@ def parse_layout_column(value: dict[str, Any], context: str) -> LayoutColumn:
         "item_heights_percent",
         "overwrite_pad_x",
         "overwrite_pad_y",
+        "width",
+        "width_percent",
+        "height",
+        "height_percent",
     }
     unknown_keys = set(value) - allowed_keys
     if unknown_keys:
@@ -740,6 +982,13 @@ def parse_layout_column(value: dict[str, Any], context: str) -> LayoutColumn:
             f"{context} col item {len(items)} sets overwrite_pad_y, but "
             "the final item has no vertical gap after it."
         )
+
+    for index, item in enumerate(items, start=1):
+        if has_axis_allocation(item, "width"):
+            raise SystemExit(
+                f"{context} col item {index} sets a width allocation, but "
+                "column children inherit the column width."
+            )
 
     raw_heights = value.get("item_heights_percent")
     item_heights_percent: tuple[float, ...] | None = None
@@ -784,6 +1033,41 @@ def parse_layout_column(value: dict[str, Any], context: str) -> LayoutColumn:
 
         item_heights_percent = tuple(percentages)
 
+    explicit_child_heights = any(
+        has_axis_allocation(item, "height")
+        for item in items
+    )
+
+    if explicit_child_heights and item_heights_percent is not None:
+        raise SystemExit(
+            f"{context} cannot mix explicit child height allocations with "
+            "item_heights_percent."
+        )
+
+    if explicit_child_heights:
+        missing = [
+            index
+            for index, item in enumerate(items, start=1)
+            if not has_axis_allocation(item, "height")
+        ]
+        if missing:
+            raise SystemExit(
+                f"{context} uses explicit child height allocation, so every "
+                "child must define height; missing item(s): "
+                + ", ".join(str(value) for value in missing)
+                + "."
+            )
+
+        remaining_count = sum(
+            1
+            for item in items
+            if item.height_remaining
+        )
+        if remaining_count > 1:
+            raise SystemExit(
+                f'{context} may contain at most one height="remaining" child.'
+            )
+
     def parse_gap_override(key: str) -> int | None:
         raw = value.get(key)
         if raw is None:
@@ -794,11 +1078,28 @@ def parse_layout_column(value: dict[str, Any], context: str) -> LayoutColumn:
             raise SystemExit(f"{context} {key} must not be negative.")
         return raw
 
+    width, width_percent, width_remaining = parse_axis_allocation(
+        value,
+        "width",
+        context,
+    )
+    height, height_percent, height_remaining = parse_axis_allocation(
+        value,
+        "height",
+        context,
+    )
+
     return LayoutColumn(
         items=items,
         item_heights_percent=item_heights_percent,
         overwrite_pad_x=parse_gap_override("overwrite_pad_x"),
         overwrite_pad_y=parse_gap_override("overwrite_pad_y"),
+        width=width,
+        width_percent=width_percent,
+        width_remaining=width_remaining,
+        height=height,
+        height_percent=height_percent,
+        height_remaining=height_remaining,
     )
 
 
@@ -940,6 +1241,21 @@ def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
                         "sibling gap."
                     )
 
+        if kind == "row":
+            for module_index, item in enumerate(modules, start=1):
+                if has_axis_allocation(item, "height"):
+                    raise SystemExit(
+                        f"page.main row {index} item {module_index} sets a "
+                        "height allocation, but row children inherit row height."
+                    )
+        else:
+            for module_index, item in enumerate(modules, start=1):
+                if has_axis_allocation(item, "width"):
+                    raise SystemExit(
+                        f"page.main col {index} item {module_index} sets a "
+                        "width allocation, but col children inherit col width."
+                    )
+
         raw_width = raw_item.get("width")
         width: int | None = None
 
@@ -956,41 +1272,67 @@ def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
 
         raw_height = raw_item.get("height")
         height: int | None = None
+        height_remaining = False
 
         if raw_height is not None:
-            if isinstance(raw_height, bool) or not isinstance(raw_height, int):
-                raise SystemExit(
-                    f"page.main {kind} {index} height must be an integer."
-                )
-            if raw_height <= 0:
-                raise SystemExit(
-                    f"page.main {kind} {index} height must be greater than zero."
-                )
-            height = raw_height
+            if isinstance(raw_height, str):
+                if raw_height != "remaining":
+                    raise SystemExit(
+                        f'page.main {kind} {index} height string value must be "remaining".'
+                    )
+                height_remaining = True
+            else:
+                if isinstance(raw_height, bool) or not isinstance(raw_height, int):
+                    raise SystemExit(
+                        f'page.main {kind} {index} height must be a positive integer or "remaining".'
+                    )
+                if raw_height <= 0:
+                    raise SystemExit(
+                        f"page.main {kind} {index} height must be greater than zero."
+                    )
+                height = raw_height
 
-        raw_height_fraction = raw_item.get("height_fraction")
-        height_fraction: float | None = None
+        if "height_fraction" in raw_item:
+            raise SystemExit(
+                f"page.main {kind} {index} uses obsolete height_fraction. "
+                "Use height_percent instead."
+            )
 
-        if raw_height_fraction is not None:
-            if isinstance(raw_height_fraction, bool) or not isinstance(
-                raw_height_fraction,
+        raw_height_percent = raw_item.get("height_percent")
+        height_percent: float | None = None
+
+        if raw_height_percent is not None:
+            if isinstance(raw_height_percent, bool) or not isinstance(
+                raw_height_percent,
                 (int, float),
             ):
                 raise SystemExit(
-                    f"page.main {kind} {index} height_fraction must be a number."
+                    f"page.main {kind} {index} height_percent must be a number."
                 )
 
-            height_fraction = float(raw_height_fraction)
-            if height_fraction <= 0 or height_fraction > 1:
+            height_percent = float(raw_height_percent)
+            if height_percent <= 0 or height_percent > 100:
                 raise SystemExit(
-                    f"page.main {kind} {index} height_fraction must be "
-                    "greater than 0 and at most 1."
+                    f"page.main {kind} {index} height_percent must be "
+                    "greater than 0 and at most 100."
                 )
 
-        if height is not None and height_fraction is not None:
+        mode_count = (
+            int(height is not None)
+            + int(height_percent is not None)
+            + int(height_remaining)
+        )
+
+        if mode_count > 1:
             raise SystemExit(
-                f"page.main {kind} {index} cannot set both height and "
-                "height_fraction."
+                f"page.main {kind} {index} may set only one of height=<px>, "
+                'height_percent=<percent>, or height="remaining".'
+            )
+
+        if mode_count == 0:
+            raise SystemExit(
+                f"page.main {kind} {index} must set height=<px>, "
+                'height_percent=<percent>, or height="remaining".'
             )
 
         item_widths_percent = parse_percentages(
@@ -1015,6 +1357,48 @@ def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
                 f"page.main col {index} cannot set item_widths_percent; "
                 "use item_heights_percent."
             )
+
+        axis = "width" if kind == "row" else "height"
+        explicit_child_axis = any(
+            has_axis_allocation(item, axis)
+            for item in modules
+        )
+        legacy_split = (
+            item_widths_percent
+            if kind == "row"
+            else item_heights_percent
+        )
+
+        if explicit_child_axis and legacy_split is not None:
+            raise SystemExit(
+                f"page.main {kind} {index} cannot mix explicit child "
+                f"{axis} allocations with "
+                f"{'item_widths_percent' if kind == 'row' else 'item_heights_percent'}."
+            )
+
+        if explicit_child_axis:
+            missing = [
+                module_index
+                for module_index, item in enumerate(modules, start=1)
+                if not has_axis_allocation(item, axis)
+            ]
+            if missing:
+                raise SystemExit(
+                    f"page.main {kind} {index} uses explicit child allocation, "
+                    f"so every child must define {axis}; missing item(s): "
+                    + ", ".join(str(value) for value in missing)
+                    + "."
+                )
+
+            remaining_count = sum(
+                1
+                for item in modules
+                if getattr(item, f"{axis}_remaining")
+            )
+            if remaining_count > 1:
+                raise SystemExit(
+                    f'page.main {kind} {index} may contain at most one {axis}="remaining" child.'
+                )
 
         if "overwrite_pad_x" in raw_item:
             raise SystemExit(
@@ -1045,14 +1429,100 @@ def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
                 modules=tuple(modules),
                 width=width,
                 height=height,
-                height_fraction=height_fraction,
+                height_percent=height_percent,
+                height_remaining=height_remaining,
                 item_widths_percent=item_widths_percent,
                 item_heights_percent=item_heights_percent,
                 overwrite_pad_y=overwrite_pad_y,
             )
         )
 
+    percent_total = sum(
+        item.height_percent
+        for item in page_items
+        if item.height_percent is not None
+    )
+    remaining_count = sum(
+        1
+        for item in page_items
+        if item.height_remaining
+    )
+
+    if percent_total > 100.0 + 1e-6:
+        raise SystemExit(
+            "page.main height_percent values must not exceed 100; "
+            f"got {percent_total:g}."
+        )
+
+    if remaining_count > 1:
+        raise SystemExit(
+            'page.main may contain at most one height="remaining" item.'
+        )
+
     return page_items
+
+
+def load_slot_layouts(
+    monitors: list[Monitor],
+    layouts_dir: Path,
+) -> dict[int, SlotLayout]:
+    """Load one independent layout TOML for every active monitor slot."""
+    layouts: dict[int, SlotLayout] = {}
+
+    for monitor in monitors:
+        if monitor.slot <= 0:
+            raise SystemExit(
+                f"Monitor '{monitor.name}' does not have a valid slot assignment."
+            )
+
+        if monitor.slot in layouts:
+            continue
+
+        path = layouts_dir / f"slot-{monitor.slot}.toml"
+        config = load_toml(path)
+        blocks = tuple(load_layout(config))
+
+        if not blocks:
+            raise SystemExit(
+                f"Slot {monitor.slot} layout contains no page.main items: {path}"
+            )
+
+        layouts[monitor.slot] = SlotLayout(
+            slot=monitor.slot,
+            path=path,
+            config=config,
+            blocks=blocks,
+        )
+
+    return layouts
+
+
+def load_slot_manifests(
+    slot_layouts: dict[int, SlotLayout],
+    modules_dir: Path,
+) -> dict[str, ModuleManifest]:
+    """Load the union of modules referenced by all active slot layouts."""
+    manifests: dict[str, ModuleManifest] = {}
+
+    for slot in sorted(slot_layouts):
+        slot_manifests = load_enabled_modules(
+            list(slot_layouts[slot].blocks),
+            modules_dir,
+        )
+
+        for name, manifest in slot_manifests.items():
+            existing = manifests.get(name)
+
+            if existing is not None and existing.directory != manifest.directory:
+                raise SystemExit(
+                    f"Module '{name}' resolves to conflicting directories "
+                    f"across slot layouts."
+                )
+
+            manifests[name] = manifest
+
+    return manifests
+
 
 def load_module_manifest(modules_dir: Path, name: str) -> ModuleManifest:
     module_dir = modules_dir / name
@@ -1196,6 +1666,12 @@ def load_enabled_modules(
                 "child has no sibling gap."
             )
 
+        if has_axis_allocation(child, "width") or has_axis_allocation(child, "height"):
+            raise SystemExit(
+                f"{context} module '{module.name}' child cannot set width/height "
+                "allocation because the wrapper defines the child rectangle."
+            )
+
         register_module(child, f"{context} module '{module.name}' child")
 
     def register_item(item: LayoutItem, context: str) -> None:
@@ -1274,6 +1750,119 @@ def calculate_block_width(
     return block.width
 
 
+
+def resolve_explicit_axis(
+    total_size: int,
+    gaps: tuple[int, ...],
+    items: tuple[LayoutItem, ...],
+    axis: str,
+    context: str,
+) -> tuple[tuple[int, ...], int]:
+    """Resolve explicit px / percent / remaining allocations for one axis."""
+    gap_total = sum(gaps)
+    available = total_size - gap_total
+
+    if available <= 0:
+        raise SystemExit(
+            f"{context} has no usable {axis} after padding: "
+            f"total={total_size}px, padding={gap_total}px."
+        )
+
+    fixed_total = sum(
+        getattr(item, axis)
+        for item in items
+        if getattr(item, axis) is not None
+    )
+    flexible_pool = available - fixed_total
+
+    if flexible_pool < 0:
+        raise SystemExit(
+            f"{context} fixed {axis} allocations exceed available space: "
+            f"available={available}px, fixed={fixed_total}px."
+        )
+
+    percent_indexes = [
+        index
+        for index, item in enumerate(items)
+        if getattr(item, f"{axis}_percent") is not None
+    ]
+    remaining_indexes = [
+        index
+        for index, item in enumerate(items)
+        if getattr(item, f"{axis}_remaining")
+    ]
+
+    if len(remaining_indexes) > 1:
+        raise SystemExit(
+            f'{context} may contain at most one {axis}="remaining" item.'
+        )
+
+    percent_total = sum(
+        getattr(items[index], f"{axis}_percent")
+        for index in percent_indexes
+    )
+
+    if percent_total > 100.0 + 1e-6:
+        raise SystemExit(
+            f"{context} {axis}_percent values must not exceed 100; "
+            f"got {percent_total:g}."
+        )
+
+    sizes = [
+        getattr(item, axis) if getattr(item, axis) is not None else 0
+        for item in items
+    ]
+
+    used_percent = 0
+
+    for percent_position, item_index in enumerate(percent_indexes):
+        percent = getattr(items[item_index], f"{axis}_percent")
+        if percent is None:
+            raise SystemExit("Internal allocation error.")
+
+        closes_pool = (
+            not remaining_indexes
+            and abs(percent_total - 100.0) <= 1e-6
+            and percent_position == len(percent_indexes) - 1
+        )
+
+        if closes_pool:
+            size = flexible_pool - used_percent
+        else:
+            size = round(flexible_pool * percent / 100.0)
+
+        sizes[item_index] = size
+        used_percent += size
+
+    if remaining_indexes:
+        remaining_index = remaining_indexes[0]
+        sizes[remaining_index] = flexible_pool - used_percent
+
+    for index, size in enumerate(sizes, start=1):
+        if size <= 0:
+            raise SystemExit(
+                f"{context} item {index} resolved to {size}px on the {axis} axis; "
+                "every explicitly allocated item must receive at least 1px."
+            )
+
+    used = sum(sizes) + gap_total
+    leftover = total_size - used
+
+    if leftover < 0:
+        raise SystemExit(
+            f"Internal {context} allocation error: resolved items exceed "
+            f"the inherited {axis}."
+        )
+
+    if remaining_indexes and leftover != 0:
+        raise SystemExit(
+            f"Internal {context} allocation error: "
+            f'{axis}="remaining" did not consume all remaining space.'
+        )
+
+    return tuple(sizes), leftover
+
+
 def calculate_item_widths(
     draw_geometry: DrawGeometry,
     layout_cfg: dict[str, Any],
@@ -1284,15 +1873,9 @@ def calculate_item_widths(
 
     block_width = calculate_block_width(draw_geometry, block)
     count = len(block.modules)
-
-    if count == 1:
-        return (block_width,)
-
     item_pad_xs = calculate_item_pad_xs(draw_geometry, layout_cfg, block)
     total_pad_x = sum(item_pad_xs)
 
-    # Keep horizontal gaps outside the item allocations. The inherited width
-    # must still leave at least one pixel for every module.
     if total_pad_x + count > block_width:
         raise SystemExit(
             "Horizontal layout has no usable item width: "
@@ -1300,7 +1883,25 @@ def calculate_item_widths(
             f"pad-x-total={total_pad_x}px, pad-x={list(item_pad_xs)}."
         )
 
+    explicit = any(
+        has_axis_allocation(item, "width")
+        for item in block.modules
+    )
+
+    if explicit:
+        widths, _ = resolve_explicit_axis(
+            block_width,
+            item_pad_xs,
+            block.modules,
+            "width",
+            "Horizontal row layout",
+        )
+        return widths
+
     available_width = block_width - total_pad_x
+
+    if count == 1:
+        return (available_width,)
 
     if block.item_widths_percent is None:
         base = available_width // count
@@ -1339,8 +1940,6 @@ def calculate_item_widths(
 
     return widths
 
-
-
 def calculate_col_item_pad_ys(
     draw_geometry: DrawGeometry,
     layout_cfg: dict[str, Any],
@@ -1371,10 +1970,6 @@ def calculate_col_item_heights(
 ) -> tuple[int, ...]:
     """Split a col's allocated height after reserving all vertical gaps."""
     count = len(col.items)
-
-    if count == 1:
-        return (allocated_height,)
-
     item_pad_ys = calculate_col_item_pad_ys(
         draw_geometry,
         layout_cfg,
@@ -1382,7 +1977,6 @@ def calculate_col_item_heights(
     )
     total_pad_y = sum(item_pad_ys)
 
-    # Leave at least one pixel for every child after all vertical gaps.
     if total_pad_y + count > allocated_height:
         raise SystemExit(
             f"Vertical col layout has no usable item height in {context}: "
@@ -1390,7 +1984,25 @@ def calculate_col_item_heights(
             f"pad-y-total={total_pad_y}px, pad-y={list(item_pad_ys)}."
         )
 
+    explicit = any(
+        has_axis_allocation(item, "height")
+        for item in col.items
+    )
+
+    if explicit:
+        heights, _ = resolve_explicit_axis(
+            allocated_height,
+            item_pad_ys,
+            col.items,
+            "height",
+            f"Vertical col layout in {context}",
+        )
+        return heights
+
     available_height = allocated_height - total_pad_y
+
+    if count == 1:
+        return (available_height,)
 
     if col.item_heights_percent is None:
         base = available_height // count
@@ -1428,8 +2040,6 @@ def calculate_col_item_heights(
         )
 
     return heights
-
-
 
 def block_as_column(block: LayoutBlock) -> LayoutColumn:
     if block.kind != "col":
@@ -1469,18 +2079,129 @@ def calculate_top_col_item_pad_ys(
     )
 
 
-def calculate_block_height(
+def resolve_page_heights(
     draw_geometry: DrawGeometry,
-    block: LayoutBlock,
-) -> int | None:
-    if block.height is not None:
-        return block.height
+    layout_cfg: dict[str, Any],
+    blocks: list[LayoutBlock],
+    context: str,
+) -> tuple[tuple[int, ...], int]:
+    """Resolve top-level page heights using px, percent, and remaining."""
+    padding_height = sum(
+        calculate_block_pad_y(
+            draw_geometry,
+            layout_cfg,
+            block,
+            is_last=index == len(blocks) - 1,
+        )
+        for index, block in enumerate(blocks)
+    )
 
-    if block.height_fraction is None:
-        return None
+    available = draw_geometry.height - padding_height
 
-    return max(1, round(draw_geometry.height * block.height_fraction))
+    if available <= 0:
+        raise SystemExit(
+            f"Layout has no usable height on {context}:\n"
+            f"  available: {draw_geometry.height}px\n"
+            f"  padding:   {padding_height}px"
+        )
 
+    fixed_height = sum(
+        block.height
+        for block in blocks
+        if block.height is not None
+    )
+    flexible_pool = available - fixed_height
+
+    if flexible_pool < 0:
+        raise SystemExit(
+            f"Layout exceeds available height on {context}:\n"
+            f"  available: {draw_geometry.height}px\n"
+            f"  fixed:     {fixed_height}px\n"
+            f"  padding:   {padding_height}px\n"
+            f"  overflow:  {-flexible_pool}px"
+        )
+
+    percent_indexes = [
+        index
+        for index, block in enumerate(blocks)
+        if block.height_percent is not None
+    ]
+    remaining_indexes = [
+        index
+        for index, block in enumerate(blocks)
+        if block.height_remaining
+    ]
+
+    if len(remaining_indexes) > 1:
+        raise SystemExit(
+            f'{context} may contain at most one height="remaining" page item.'
+        )
+
+    percent_total = sum(
+        blocks[index].height_percent
+        for index in percent_indexes
+        if blocks[index].height_percent is not None
+    )
+
+    if percent_total > 100.0 + 1e-6:
+        raise SystemExit(
+            f"{context} height_percent values must not exceed 100; "
+            f"got {percent_total:g}."
+        )
+
+    heights: list[int] = [
+        block.height if block.height is not None else 0
+        for block in blocks
+    ]
+
+    used_percent = 0
+
+    for percent_position, block_index in enumerate(percent_indexes):
+        percent = blocks[block_index].height_percent
+        if percent is None:
+            raise SystemExit("Internal height allocation error.")
+
+        closes_pool = (
+            not remaining_indexes
+            and abs(percent_total - 100.0) <= 1e-6
+            and percent_position == len(percent_indexes) - 1
+        )
+
+        if closes_pool:
+            height = flexible_pool - used_percent
+        else:
+            height = round(flexible_pool * percent / 100.0)
+
+        heights[block_index] = height
+        used_percent += height
+
+    if remaining_indexes:
+        remaining_index = remaining_indexes[0]
+        heights[remaining_index] = flexible_pool - used_percent
+
+    for index, height in enumerate(heights, start=1):
+        if height <= 0:
+            raise SystemExit(
+                f"page.main item {index} resolves to {height}px on {context}; "
+                "every page item must receive at least 1px."
+            )
+
+    used_height = sum(heights) + padding_height
+    remaining_height = draw_geometry.height - used_height
+
+    if remaining_height < 0:
+        raise SystemExit(
+            f"Internal page height allocation error on {context}: "
+            "resolved items exceed the draw height."
+        )
+
+    if remaining_indexes and remaining_height != 0:
+        raise SystemExit(
+            f"Internal page height allocation error on {context}: "
+            'height="remaining" did not consume all remaining height.'
+        )
+
+    return tuple(heights), remaining_height
 
 def validate_vertical_layout(
     monitor: Monitor,
@@ -1488,37 +2209,13 @@ def validate_vertical_layout(
     layout_cfg: dict[str, Any],
     blocks: list[LayoutBlock],
 ) -> int:
-    """Ensure fixed page-item allocations and their vertical gaps fit vertically."""
-    module_height = 0
-    padding_height = 0
-
-    for index, block in enumerate(blocks):
-        height = calculate_block_height(draw_geometry, block)
-        if height is None:
-            raise SystemExit(
-                f"Cannot validate vertical layout for monitor '{monitor.name}': "
-                f"page item {index + 1} has auto height. Set height or height_fraction."
-            )
-
-        module_height += height
-        padding_height += calculate_block_pad_y(
-            draw_geometry,
-            layout_cfg,
-            block,
-            is_last=index == len(blocks) - 1,
-        )
-
-    remaining = draw_geometry.height - module_height - padding_height
-
-    if remaining < 0:
-        raise SystemExit(
-            f"Layout exceeds available height on monitor '{monitor.name}':\n"
-            f"  available: {draw_geometry.height}px\n"
-            f"  modules:   {module_height}px\n"
-            f"  padding:   {padding_height}px\n"
-            f"  overflow:  {-remaining}px"
-        )
-
+    """Validate and resolve the complete vertical page allocation."""
+    _, remaining = resolve_page_heights(
+        draw_geometry,
+        layout_cfg,
+        blocks,
+        f"monitor '{monitor.name}'",
+    )
     return remaining
 
 
@@ -1585,8 +2282,9 @@ def generator_context(
             "block": block_index,
             "width": allocated_width,
             "height": allocated_height,
-            "height_pixels": allocated_height if nested else block.height,
-            "height_fraction": None if nested else block.height_fraction,
+            "height_pixels": allocated_height,
+            "height_percent": None if nested else block.height_percent,
+            "height_remaining": False if nested else block.height_remaining,
         },
         "spacing": {
             "edge": int(spacing_cfg.get("edge", 0)),
@@ -1790,17 +2488,18 @@ def build_layout_for_monitor(
     geometry: BarGeometry,
     waybar_cfg: dict[str, Any],
     layout_cfg: dict[str, Any],
+    app_commands: dict[str, str],
 ) -> list[tuple[str, str]]:
     owners: dict[str, str] = {}
     generated_css: list[tuple[str, str]] = []
     frame_modules: list[str] = []
 
     draw_geometry = calculate_draw_geometry(geometry, layout_cfg)
-    validate_vertical_layout(
-        monitor,
+    page_heights, _ = resolve_page_heights(
         draw_geometry,
         layout_cfg,
         blocks,
+        f"monitor '{monitor.name}'",
     )
 
     def render_placement(
@@ -1818,11 +2517,17 @@ def build_layout_for_monitor(
         owner = f"{module_ref.reference}@{placement_id}"
 
         if manifest.generator is not None:
+            placement_parameters = resolve_placement_app_aliases(
+                module_ref.parameters or {},
+                app_commands,
+                owner,
+            )
+
             root, entries, css, child_inset, wrapper_click = render_generated_module(
                 project_root,
                 manifest,
                 module_ref.instance,
-                module_ref.parameters or {},
+                placement_parameters,
                 monitor,
                 geometry,
                 waybar_cfg,
@@ -1897,6 +2602,16 @@ def build_layout_for_monitor(
                 raise SystemExit(
                     f"Wrapper module '{manifest.name}' child cannot set "
                     "overwrite_pad_x/overwrite_pad_y because it has no sibling."
+                )
+
+            if (
+                has_axis_allocation(child_ref, "width")
+                or has_axis_allocation(child_ref, "height")
+            ):
+                raise SystemExit(
+                    f"Wrapper module '{manifest.name}' child cannot set "
+                    "width/height allocation because the wrapper defines the "
+                    "child rectangle."
                 )
 
             child_width = allocated_width - (2 * child_inset)
@@ -1989,7 +2704,7 @@ def build_layout_for_monitor(
 
         col_css.extend(
             [
-                f"{selector} #group-layout-col-{placement_id} {{",
+                f"{selector} #layout-col-{placement_id} {{",
                 f"    min-width: {allocated_width}px;",
                 f"    min-height: {allocated_height}px;",
                 "    padding: 0;",
@@ -2067,13 +2782,7 @@ def build_layout_for_monitor(
 
     for block_index, block in enumerate(blocks, start=1):
         block_width = calculate_block_width(draw_geometry, block)
-        block_height = calculate_block_height(draw_geometry, block)
-
-        if block_height is None:
-            raise SystemExit(
-                f"page.main {block.kind} {block_index} does not resolve to a "
-                "fixed height; nested module geometry requires a concrete height."
-            )
+        block_height = page_heights[block_index - 1]
 
         container_modules: list[str] = []
         selector = f"window#waybar.sidebar-{css_safe(monitor.name)}"
@@ -2231,7 +2940,7 @@ def build_layout_for_monitor(
                 f"core-layout-{block.kind}@main-{block_index}",
                 "\n".join(
                     [
-                        f"{selector} #group-layout-main-{block.kind}-"
+                        f"{selector} #layout-main-{block.kind}-"
                         f"{block_index} {{",
                         f"    min-width: {block_width}px;",
                         f"    min-height: {block_height}px;",
@@ -2302,9 +3011,9 @@ def generate_waybar_config(
     project_root: Path,
     monitors: list[Monitor],
     waybar_cfg: dict[str, Any],
-    layout_cfg: dict[str, Any],
-    blocks: list[LayoutBlock],
+    slot_layouts: dict[int, SlotLayout],
     manifests: dict[str, ModuleManifest],
+    app_commands: dict[str, str],
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str, str]]]:
     bar_cfg = required(waybar_cfg, "bar", "waybar.toml")
 
@@ -2318,6 +3027,16 @@ def generate_waybar_config(
     generated_module_css: list[tuple[str, str, str]] = []
 
     for monitor in monitors:
+        slot_layout = slot_layouts.get(monitor.slot)
+        if slot_layout is None:
+            raise SystemExit(
+                f"No layout was loaded for monitor '{monitor.name}' "
+                f"(slot {monitor.slot})."
+            )
+
+        layout_cfg = slot_layout.config
+        blocks = list(slot_layout.blocks)
+
         geometry = calculate_geometry(monitor, waybar_cfg)
         bar_name = f"sidebar-{css_safe(monitor.name)}"
 
@@ -2349,6 +3068,7 @@ def generate_waybar_config(
             geometry,
             waybar_cfg,
             layout_cfg,
+            app_commands,
         )
 
         for module_name, css in monitor_css:
@@ -2365,8 +3085,7 @@ def quote_css_string(value: str) -> str:
 def generate_core_css(
     monitors: list[Monitor],
     waybar_cfg: dict[str, Any],
-    layout_cfg: dict[str, Any],
-    blocks: list[LayoutBlock],
+    slot_layouts: dict[int, SlotLayout],
 ) -> str:
     bar_cfg = required(waybar_cfg, "bar", "waybar.toml")
     font_cfg = required(waybar_cfg, "font", "waybar.toml")
@@ -2388,6 +3107,16 @@ def generate_core_css(
     ]
 
     for monitor in monitors:
+        slot_layout = slot_layouts.get(monitor.slot)
+        if slot_layout is None:
+            raise SystemExit(
+                f"No layout was loaded for monitor '{monitor.name}' "
+                f"(slot {monitor.slot})."
+            )
+
+        layout_cfg = slot_layout.config
+        blocks = list(slot_layout.blocks)
+
         geometry = calculate_geometry(monitor, waybar_cfg)
         draw_geometry = calculate_draw_geometry(geometry, layout_cfg)
         border_width = geometry.border_width
@@ -2457,8 +3186,7 @@ def generate_core_css(
 def generate_css(
     monitors: list[Monitor],
     waybar_cfg: dict[str, Any],
-    layout_cfg: dict[str, Any],
-    blocks: list[LayoutBlock],
+    slot_layouts: dict[int, SlotLayout],
     manifests: dict[str, ModuleManifest],
     generated_module_css: list[tuple[str, str, str]],
 ) -> str:
@@ -2466,8 +3194,7 @@ def generate_css(
         generate_core_css(
             monitors,
             waybar_cfg,
-            layout_cfg,
-            blocks,
+            slot_layouts,
         ).rstrip()
     ]
 
@@ -2514,24 +3241,60 @@ def atomic_write(path: Path, content: str) -> None:
 def print_summary(
     monitors: list[Monitor],
     waybar_cfg: dict[str, Any],
-    layout_cfg: dict[str, Any],
-    blocks: list[LayoutBlock],
+    slot_layouts: dict[int, SlotLayout],
 ) -> None:
     print("Hypr Sidebar generation plan")
     print()
 
+    def summarize_nested(item: LayoutItem) -> str:
+        if isinstance(item, LayoutModule):
+            text_value = item.reference
+        else:
+            heights = (
+                "equal"
+                if item.item_heights_percent is None
+                else "["
+                + ", ".join(f"{value:g}%" for value in item.item_heights_percent)
+                + "]"
+            )
+            children = ", ".join(
+                summarize_nested(child)
+                for child in item.items
+            )
+            text_value = f"col[{children}; heights={heights}]"
+
+        width_mode = describe_axis_allocation(item, "width")
+        height_mode = describe_axis_allocation(item, "height")
+        allocation = []
+
+        if width_mode is not None:
+            allocation.append(f"width={width_mode}")
+        if height_mode is not None:
+            allocation.append(f"height={height_mode}")
+
+        if allocation:
+            text_value += "{" + ", ".join(allocation) + "}"
+
+        return text_value
+
     for monitor in monitors:
+        slot_layout = slot_layouts[monitor.slot]
+        layout_cfg = slot_layout.config
+        blocks = list(slot_layout.blocks)
+
         geometry = calculate_geometry(monitor, waybar_cfg)
         draw_geometry = calculate_draw_geometry(geometry, layout_cfg)
-        remaining_height = validate_vertical_layout(
-            monitor,
+        resolved_heights, remaining_height = resolve_page_heights(
             draw_geometry,
             layout_cfg,
             blocks,
+            f"monitor '{monitor.name}'",
         )
+
         print(
             f"{monitor.name}: "
             f"slot={monitor.slot}, "
+            f"layout={slot_layout.path.name}, "
             f"logical={monitor.logical_width}x{monitor.logical_height}, "
             f"scale={monitor.scale:g}, "
             f"sidebar={geometry.width}px, "
@@ -2545,124 +3308,120 @@ def print_summary(
             f"font={geometry.font_size:.2f}px"
         )
 
-    print()
-    print("Layout:")
+        print(f"  page.main ({slot_layout.path}):")
 
-    def summarize_nested(item: LayoutItem) -> str:
-        if isinstance(item, LayoutModule):
-            return item.reference
-
-        heights = (
-            "equal"
-            if item.item_heights_percent is None
-            else "["
-            + ", ".join(f"{value:g}%" for value in item.item_heights_percent)
-            + "]"
-        )
-        children = ", ".join(
-            summarize_nested(child)
-            for child in item.items
-        )
-        return f"col[{children}; heights={heights}]"
-
-    for index, page_item in enumerate(blocks, start=1):
-        width = "full" if page_item.width is None else f"{page_item.width}px"
-
-        if page_item.height is not None:
-            height = f"{page_item.height}px"
-        elif page_item.height_fraction is None:
-            height = "auto"
-        else:
-            resolved = ", ".join(
-                f"{monitor.name}="
-                f"{calculate_block_height(calculate_draw_geometry(calculate_geometry(monitor, waybar_cfg), layout_cfg), page_item)}px"
-                for monitor in monitors
-            )
-            height = (
-                f"{page_item.height_fraction:.4f} of usable height; "
-                f"{resolved}"
+        for index, page_item in enumerate(blocks, start=1):
+            width = (
+                "full"
+                if page_item.width is None
+                else f"{page_item.width}px"
             )
 
-        children = ", ".join(
-            summarize_nested(item)
-            for item in page_item.modules
-        )
+            resolved_height = resolved_heights[index - 1]
 
-        if page_item.kind == "row":
-            split = (
-                "equal"
-                if page_item.item_widths_percent is None
-                else "["
-                + ", ".join(
-                    f"{value:g}%"
-                    for value in page_item.item_widths_percent
+            if page_item.height is not None:
+                height = f"{page_item.height}px"
+            elif page_item.height_percent is not None:
+                height = (
+                    f"{page_item.height_percent:g}% of flexible height; "
+                    f"{resolved_height}px"
                 )
-                + "]"
+            else:
+                height = f"remaining; {resolved_height}px"
+
+            children = ", ".join(
+                summarize_nested(item)
+                for item in page_item.modules
             )
-            split_text = f"item-widths={split}"
-        else:
-            split = (
-                "equal"
-                if page_item.item_heights_percent is None
-                else "["
-                + ", ".join(
-                    f"{value:g}%"
-                    for value in page_item.item_heights_percent
+
+            if page_item.kind == "row":
+                split = (
+                    "equal"
+                    if page_item.item_widths_percent is None
+                    else "["
+                    + ", ".join(
+                        f"{value:g}%"
+                        for value in page_item.item_widths_percent
+                    )
+                    + "]"
                 )
-                + "]"
+                split_text = f"item-widths={split}"
+            else:
+                split = (
+                    "equal"
+                    if page_item.item_heights_percent is None
+                    else "["
+                    + ", ".join(
+                        f"{value:g}%"
+                        for value in page_item.item_heights_percent
+                    )
+                    + "]"
+                )
+                split_text = f"item-heights={split}"
+
+            pad_y = (
+                "inherit"
+                if page_item.overwrite_pad_y is None
+                else f"{page_item.overwrite_pad_y}px"
             )
-            split_text = f"item-heights={split}"
 
-        pad_y = (
-            "inherit"
-            if page_item.overwrite_pad_y is None
-            else f"{page_item.overwrite_pad_y}px"
-        )
+            print(
+                f"    {page_item.kind} {index}: {children} "
+                f"(width={width}, {split_text}, height={height}, "
+                f"overwrite-pad-y={pad_y})"
+            )
 
-        print(
-            f"  {page_item.kind} {index}: {children} "
-            f"(width={width}, {split_text}, height={height}, "
-            f"overwrite-pad-y={pad_y})"
-        )
+        print()
 
 def main() -> int:
     args = parse_args()
     project_root = args.project_root.expanduser().resolve()
 
     config_dir = project_root / "config"
+    layouts_dir = config_dir / "layouts"
     modules_dir = project_root / "modules"
     waybar_dir = project_root / "waybar"
 
     waybar_cfg = load_toml(config_dir / "waybar.toml")
-    layout_cfg = load_toml(config_dir / "layout.toml")
-
     monitors_cfg = load_toml(config_dir / "monitors.toml")
+    apps_cfg = load_toml(config_dir / "apps.toml")
+    app_commands = load_app_commands(apps_cfg)
 
-    blocks = load_layout(layout_cfg)
-    manifests = load_enabled_modules(blocks, modules_dir)
     monitors = assign_monitor_slots(
         read_hyprland_monitors(),
         monitors_cfg,
+    )
+
+    slot_layouts = load_slot_layouts(
+        monitors,
+        layouts_dir,
+    )
+    manifests = load_slot_manifests(
+        slot_layouts,
+        modules_dir,
     )
 
     generated_config, generated_module_css = generate_waybar_config(
         project_root,
         monitors,
         waybar_cfg,
-        layout_cfg,
-        blocks,
+        slot_layouts,
         manifests,
+        app_commands,
     )
     generated_css = generate_css(
         monitors,
         waybar_cfg,
-        layout_cfg,
-        blocks,
+        slot_layouts,
         manifests,
         generated_module_css,
     )
 
-    print_summary(monitors, waybar_cfg, layout_cfg, blocks)
+    print_summary(
+        monitors,
+        waybar_cfg,
+        slot_layouts,
+    )
 
     config_text = json.dumps(generated_config, indent=2) + "\n"
 

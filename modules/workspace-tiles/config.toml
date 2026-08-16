@@ -9,7 +9,7 @@ max_visible = 0
 
 # Fraction of the bar's inner width occupied by the complete grid,
 # including gaps between columns. 0.92 preserves the current 2-column layout.
-grid_width_fraction = 0.92
+grid_width_fraction = 1.0
 
 # Horizontal and vertical gap as a fraction of the bar's inner width.
 gap_fraction = 0.02

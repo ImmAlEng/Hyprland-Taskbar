@@ -1,0 +1,13 @@
+[module]
+name = "wifi"
+version = 1
+description = "NetworkManager connection status icon."
+
+[generator]
+entrypoint = "scripts/generate.py"
+
+[dependencies]
+commands = ["python3", "nmcli"]
+
+[dependencies.arch]
+packages = ["python", "networkmanager"]

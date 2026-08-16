@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shlex
 import sys
 import tomllib
@@ -31,6 +32,7 @@ def load_context() -> dict[str, Any]:
 
 def load_config(module_dir: Path) -> dict[str, Any]:
     path = module_dir / "config.toml"
+
     try:
         with path.open("rb") as handle:
             return tomllib.load(handle)
@@ -42,13 +44,40 @@ def load_config(module_dir: Path) -> dict[str, Any]:
 
 def css_rgba(value: str) -> str:
     value = value.strip()
+
     if not value.startswith("rgba("):
         fail(f"expected rgba(...) color, got: {value}")
+
     return value
 
 
 def chunked(values: list[str], size: int) -> list[list[str]]:
-    return [values[index : index + size] for index in range(0, len(values), size)]
+    return [
+        values[index : index + size]
+        for index in range(0, len(values), size)
+    ]
+
+
+def require_dimension(
+    layout: dict[str, Any],
+    key: str,
+    placement_id: str,
+) -> int:
+    value = layout.get(key)
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        fail(
+            f"workspace-tiles placement '{placement_id}' requires an integer "
+            f"allocated {key} from the layout core"
+        )
+
+    if value <= 0:
+        fail(
+            f"workspace-tiles placement '{placement_id}' allocated {key} "
+            "must be greater than zero"
+        )
+
+    return value
 
 
 def main() -> int:
@@ -56,11 +85,37 @@ def main() -> int:
 
     module_dir = Path(str(context["module_dir"]))
     monitor = context["monitor"]
-    bar = context["bar"]
+    placement = context.get("placement", {})
+    layout = context.get("layout", {})
+
+    if not isinstance(placement, dict):
+        fail("placement context must be an object")
+
+    if not isinstance(layout, dict):
+        fail("layout context must be an object")
 
     monitor_name = str(monitor["name"])
     monitor_css = str(monitor["css"])
     monitor_slot = str(monitor["slot"])
+
+    placement_id = placement.get("id")
+
+    if not isinstance(placement_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9_-]+",
+        placement_id,
+    ):
+        fail("workspace-tiles did not receive a valid placement id from the core")
+
+    allocated_width = require_dimension(
+        layout,
+        "width",
+        placement_id,
+    )
+    allocated_height = require_dimension(
+        layout,
+        "height",
+        placement_id,
+    )
 
     config = load_config(module_dir)
     grid = config["grid"]
@@ -68,6 +123,7 @@ def main() -> int:
     workspace_slots = config["workspace_slots"]
 
     raw_workspaces = workspace_slots.get(monitor_slot)
+
     if not isinstance(raw_workspaces, list) or len(raw_workspaces) < 2:
         fail(
             f"monitor slot {monitor_slot} must define at least two workspaces "
@@ -87,6 +143,7 @@ def main() -> int:
 
     if columns <= 0:
         fail("grid.columns must be greater than zero")
+
     if max_visible < 0:
         fail("grid.max_visible must be zero or greater")
 
@@ -95,7 +152,6 @@ def main() -> int:
     effective_columns = min(columns, visible_count)
     rows = math.ceil(visible_count / effective_columns)
 
-    inner_width = int(bar["inner_width"])
     tile_border = int(grid.get("border_width", 1))
 
     grid_width_fraction = float(grid.get("grid_width_fraction", 0.92))
@@ -105,20 +161,23 @@ def main() -> int:
 
     if not 0 < grid_width_fraction <= 1:
         fail("grid.grid_width_fraction must be greater than 0 and at most 1")
+
     if gap_fraction < 0:
         fail("grid.gap_fraction must be zero or greater")
+
     if aspect_ratio <= 0:
         fail("grid.aspect_ratio must be greater than zero")
+
     if tile_border < 0:
         fail("grid.border_width must be zero or greater")
+
     if interval <= 0:
         fail("grid.refresh_interval must be greater than zero")
 
-    if inner_width <= 0:
-        fail("bar inner width must be greater than zero")
-
-    gap = int(inner_width * gap_fraction)
-    target_grid_width = int(inner_width * grid_width_fraction)
+    # Internal grid geometry is now based only on the rectangle allocated by
+    # the layout core. The module no longer uses the full sidebar inner width.
+    gap = int(allocated_width * gap_fraction)
+    target_grid_width = int(allocated_width * grid_width_fraction)
     total_gaps = gap * (effective_columns - 1)
     available_for_tiles = target_grid_width - total_gaps
 
@@ -127,10 +186,10 @@ def main() -> int:
 
     tile_outer_width = available_for_tiles // effective_columns
     used_width = tile_outer_width * effective_columns + total_gaps
-    remaining_width = inner_width - used_width
+    remaining_width = allocated_width - used_width
 
     if remaining_width < 0:
-        fail("calculated grid exceeds the available bar width")
+        fail("calculated grid exceeds the allocated module width")
 
     outer_gap_left = remaining_width // 2
     outer_gap_right = remaining_width - outer_gap_left
@@ -147,14 +206,39 @@ def main() -> int:
     top_gap = outer_gap_left
     row_gap = gap
 
-    root = f"group/workspace-tiles-{monitor_css}"
+    used_height = (
+        top_gap
+        + rows * tile_outer_height
+        + max(0, rows - 1) * row_gap
+    )
+
+    if used_height > allocated_height:
+        fail(
+            f"workspace-tiles does not fit on monitor '{monitor_name}':\n"
+            f"  placement: {placement_id}\n"
+            f"  allocated: {allocated_width}x{allocated_height}px\n"
+            f"  required:  {allocated_width}x{used_height}px"
+        )
+
+    root = (
+        f"group/workspace-tiles-{monitor_css}-{placement_id}"
+    )
+
     tile_names = [
-        f"image#workspace-tile-{monitor_css}-{index}"
+        (
+            f"image#workspace-tile-"
+            f"{monitor_css}-{placement_id}-{index}"
+        )
         for index in range(1, visible_count + 1)
     ]
+
     tile_rows = chunked(tile_names, effective_columns)
+
     row_names = [
-        f"group/workspace-tiles-{monitor_css}-row-{index}"
+        (
+            f"group/workspace-tiles-"
+            f"{monitor_css}-{placement_id}-row-{index}"
+        )
         for index in range(1, rows + 1)
     ]
 
@@ -176,6 +260,7 @@ def main() -> int:
 
     if not runtime.is_file():
         fail(f"missing tile runtime: {runtime}")
+
     if not renderer.is_file():
         fail(
             f"missing workspace renderer: {renderer}; copy the active "
@@ -194,6 +279,7 @@ def main() -> int:
             str(index),
             *workspace_args,
         ]
+
         click_args = base_args.copy()
         click_args[2] = "switch"
 
@@ -206,7 +292,10 @@ def main() -> int:
         }
 
     selectors = {
-        name: f"#image.workspace-tile-{monitor_css}-{index}"
+        name: (
+            f"#image.workspace-tile-"
+            f"{monitor_css}-{placement_id}-{index}"
+        )
         for index, name in enumerate(tile_names, start=1)
     }
 
@@ -215,17 +304,32 @@ def main() -> int:
     hover_background = css_rgba(str(theme["hover_background"]))
     hover_border = css_rgba(str(theme["hover_border"]))
 
+    root_selector = (
+        f"#workspace-tiles-{monitor_css}-{placement_id}"
+    )
+
     all_selectors = [selectors[name] for name in tile_names]
+
     css_parts = [
         f"/* Workspace tile geometry for {monitor_name}. */",
-        ",\n".join(all_selectors)
-        + " {\n"
-        + f"    min-width: {tile_width}px;\n"
-        + f"    min-height: {tile_height}px;\n"
-        + "    padding: 0;\n"
-        + f"    background: {background};\n"
-        + f"    border: {tile_border}px solid {border};\n"
-        + "}",
+        (
+            f"{root_selector} {{\n"
+            f"    min-width: {allocated_width}px;\n"
+            f"    min-height: {allocated_height}px;\n"
+            "    padding: 0;\n"
+            "    margin: 0;\n"
+            "}"
+        ),
+        (
+            ",\n".join(all_selectors)
+            + " {\n"
+            + f"    min-width: {tile_width}px;\n"
+            + f"    min-height: {tile_height}px;\n"
+            + "    padding: 0;\n"
+            + f"    background: {background};\n"
+            + f"    border: {tile_border}px solid {border};\n"
+            + "}"
+        ),
     ]
 
     for row_index, row_tiles in enumerate(tile_rows):
@@ -236,8 +340,12 @@ def main() -> int:
 
             missing_columns = effective_columns - len(row_tiles)
             margin_right = 0
+
             if column_index == len(row_tiles) - 1:
-                margin_right = right_margin + missing_columns * (tile_outer_width + gap)
+                margin_right = (
+                    right_margin
+                    + missing_columns * (tile_outer_width + gap)
+                )
 
             css_parts.append(
                 f"{selector} {{\n"
@@ -248,7 +356,11 @@ def main() -> int:
                 "}"
             )
 
-    hover_selectors = [selector + ":hover" for selector in all_selectors]
+    hover_selectors = [
+        selector + ":hover"
+        for selector in all_selectors
+    ]
+
     css_parts.append(
         ",\n".join(hover_selectors)
         + " {\n"
@@ -265,6 +377,7 @@ def main() -> int:
         },
         sys.stdout,
     )
+
     sys.stdout.write("\n")
     return 0
 

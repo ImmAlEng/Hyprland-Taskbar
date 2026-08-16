@@ -1,0 +1,52 @@
+# Hypr Sidebar - larger row/col integration test
+
+[layout]
+draw_margin_fraction = 0.04
+pad_y = 13
+
+[[page.main.item]]
+type = "row"
+modules = ["current-workspace"]
+height = 15
+
+[[page.main.item]]
+type = "row"
+modules = ["workspace-tiles"]
+height = 146
+
+[[page.main.item]]
+type = "row"
+modules = [
+    { module = "box", child = { module = "textbox", text = "LLM Placeholder" } },
+]
+height = "remaining"
+
+[[page.main.item]]
+type = "row"
+modules = [
+    { module = "box", border = 0, click = "app:audio", child = { module = "textbox", text = "" } },
+    { module = "volume-slider" },
+    { module = "box", border = 0, child = { module = "audio-toggle", target = "sink" } },
+    { module = "box", border = 0, child = { module = "audio-toggle", target = "source" } },
+]
+item_widths_percent = [12, 64, 12, 12]
+height = 32
+
+[[page.main.item]]
+type = "row"
+modules = [
+    { module = "box", border = 0, click = "app:file_manager", child = { module = "textbox", text = "" } },
+    { module = "box", border = 0, click = "app:bluetooth", child = { module = "textbox", text = "" } },
+    { module = "box", border = 0, click = "app:network_manager", child = { module = "wifi" } },
+    { module = "box", border = 0, child = { module = "textbox", text = "VPN" } },
+]
+item_widths_percent = [25, 25, 25, 25]
+height = 32
+
+[[page.main.item]]
+type = "row"
+modules = [
+    { module = "clock" },
+]
+height = 30
+

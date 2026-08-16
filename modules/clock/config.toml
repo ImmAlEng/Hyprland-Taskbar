@@ -1,0 +1,14 @@
+# clock
+#
+# Placement parameters:
+# format     -> defaults to "{:%H:%M · %a %d-%m}"
+# alignment  -> defaults to "center"
+# color      -> defaults to "#ffffff"
+# font       -> inherits the core font family
+# font_size  -> inherits the monitor-aware core font size
+#
+# Example:
+# { module = "clock" }
+#
+# Custom example:
+# { module = "clock", format = "{:%H:%M}", alignment = "right" }

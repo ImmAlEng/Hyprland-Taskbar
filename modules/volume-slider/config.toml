@@ -1,0 +1,13 @@
+[slider]
+min = 0
+max = 100
+target = "sink"
+zero_on_mute = false
+unmute_on_volume_change = true
+
+[display]
+track_height = 6
+radius = 3
+background = "rgba(95, 100, 103, 0.45)"
+fill = "#ffffff"
+muted_fill = "#ff0000"
