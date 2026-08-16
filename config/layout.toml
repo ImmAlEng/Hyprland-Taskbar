@@ -1,81 +1,82 @@
-# Hypr Sidebar - textbox placement parameter test
+# Hypr Sidebar - larger row/col integration test
 
 [layout]
 draw_margin_fraction = 0.04
 pad_y = 13
 
-[page.main]
-
-[[page.main.block]]
-modules = ["color-block:green"]
-height = 20
-
-[[page.main.block]]
+# 1. Simple horizontal row with an intentional empty center.
+[[page.main.item]]
+type = "row"
 modules = [
-    { module = "color-block:red", overwrite_pad_x = 15 },
-    { module = "textbox", text = "hello", overwrite_pad_x = 20 },
-    "color-block:blue",
+    { module = "textbox", text = "left", alignment = "left", overwrite_pad_x = 8 },
+    { module = "empty", overwrite_pad_x = 8 },
+    { module = "textbox", text = "right", alignment = "right" },
 ]
-item_widths_percent = [25, 70, 5]
-height = 25
+item_widths_percent = [30, 40, 30]
+height = 34
 
-[[page.main.block]]
-modules = ["color-block:yellow"]
-height = 15
-
-[[page.main.block]]
+# 2. Real top-level vertical col with explicit vertical gap overrides.
+[[page.main.item]]
+type = "col"
 modules = [
-    { module = "textbox", text = "goodbye" },
+    { module = "color-block:red", overwrite_pad_y = 4 },
+    { module = "color-block:blue", overwrite_pad_y = 10 },
+    { module = "color-block:green", overwrite_pad_y = 2 },
+    "color-block:yellow",
 ]
-height = 30
+item_heights_percent = [10, 20, 30, 40]
+height = 140
+overwrite_pad_y = 20
 
-[[page.main.block]]
+# 3. Row containing a normal module, a nested col, and another module.
+[[page.main.item]]
+type = "row"
 modules = [
-    { module = "textbox", text = "bigger font", font_size = 22 },
+    { module = "color-block:red", overwrite_pad_x = 6 },
+    { col = [{ module = "textbox", text = "nested top", overwrite_pad_y = 6 }, { module = "textbox", text = "nested bottom" }], item_heights_percent = [50, 50], overwrite_pad_x = 12 },
+    { module = "color-block:blue" },
 ]
-height = 35
+item_widths_percent = [15, 70, 15]
+height = 90
 
-[[page.main.block]]
+# 4. Textbox feature row.
+[[page.main.item]]
+type = "row"
 modules = [
-    { module = "textbox", text = "smaller font", font_size = 10 },
+    { module = "textbox", text = "RED", color = "#ff0000", overwrite_pad_x = 8 },
+    { module = "textbox", text = "BIG", font_size = 20, overwrite_pad_x = 8 },
+    { module = "textbox", text = "small", font_size = 10 },
 ]
-height = 20
+item_widths_percent = [34, 33, 33]
+height = 40
 
-[[page.main.block]]
+# 5. Box wrapper test.
+[[page.main.item]]
+type = "row"
 modules = [
-    { module = "textbox", text = "right aligned", alignment = "right" },
+    { module = "box", radius = 8, child = { module = "textbox", text = "box 1" }, overwrite_pad_x = 10 },
+    { module = "box", border = 0, child = { module = "textbox", text = "box 0" } },
 ]
-height = 30
+item_widths_percent = [50, 50]
+height = 40
 
-[[page.main.block]]
+# 6. Another top-level col to prove row -> col -> row -> col ordering.
+[[page.main.item]]
+type = "col"
 modules = [
-    { module = "textbox", text = "left aligned", alignment = "left" },
+    { module = "textbox", text = "top", alignment = "center", overwrite_pad_y = 5 },
+    { module = "empty", overwrite_pad_y = 5 },
+    { module = "textbox", text = "bottom", alignment = "center" },
 ]
-height = 30
+item_heights_percent = [30, 40, 30]
+height = 120
 
-[[page.main.block]]
+# 7. Final row. No trailing page pad_y after this item.
+[[page.main.item]]
+type = "row"
 modules = [
-    { module = "textbox", text = "different font", font = "serif" },
+    { module = "color-block:green", overwrite_pad_x = 15 },
+    { module = "textbox", text = "done" },
 ]
-height = 30
-
-[[page.main.block]]
-modules = [
-    { module = "textbox", text = "red", color = "#ff0000" },
-]
-height = 30
-
-[[page.main.block]]
-modules = [
-    { module = "textbox", text = "left" },
-    { module = "empty" },
-    { module = "textbox", text = "right" },
-]
-item_widths_percent = [45, 10, 45]
-height = 30
-
-[[page.main.block]]
-modules = [
-    { module = "box", click = "~/.config/hypr-sidebar/test.sh", border = 3, child = { module = "textbox", text = "boxed" } },
-]
+item_widths_percent = [25, 75]
 height = 30

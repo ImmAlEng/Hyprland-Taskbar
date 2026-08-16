@@ -22,10 +22,14 @@ def main() -> int:
     module_dir = Path(context["module_dir"])
     monitor_css = str(context["monitor"]["css"])
     module_context = context.get("module", {})
+    placement = context.get("placement", {})
     layout = context.get("layout", {})
 
     if not isinstance(module_context, dict):
         fail("module context must be an object")
+
+    if not isinstance(placement, dict):
+        fail("placement context must be an object")
 
     instance = module_context.get("instance")
     if not isinstance(instance, str) or not instance:
@@ -33,6 +37,13 @@ def main() -> int:
 
     if not re.fullmatch(r"[A-Za-z0-9_-]+", instance):
         fail("color-block instance contains unsupported characters")
+
+    placement_id = placement.get("id")
+    if not isinstance(placement_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9_-]+",
+        placement_id,
+    ):
+        fail("color-block did not receive a valid placement id from the core")
 
     with (module_dir / "config.toml").open("rb") as handle:
         config = tomllib.load(handle)
@@ -52,10 +63,10 @@ def main() -> int:
     width = layout.get("width")
     height = layout.get("height")
 
-    root = f"custom/color-block-{instance}"
+    root = f"custom/color-block-{instance}-{placement_id}"
     selector = (
         f"window#waybar.sidebar-{monitor_css} "
-        f"#custom-color-block-{instance}"
+        f"#custom-color-block-{instance}-{placement_id}"
     )
 
     css_lines = [

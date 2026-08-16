@@ -6,7 +6,7 @@ Core responsibilities:
 - read global TOML configuration
 - discover active Hyprland monitors
 - calculate monitor-specific bar geometry
-- read layout blocks
+- read layout rows and nested col containers
 - load module manifests
 - expand module templates
 - generate Waybar config.jsonc
@@ -86,6 +86,7 @@ class LayoutModule:
     name: str
     instance: str | None = None
     overwrite_pad_x: int | None = None
+    overwrite_pad_y: int | None = None
     parameters: dict[str, Any] | None = None
 
     @property
@@ -96,12 +97,25 @@ class LayoutModule:
 
 
 @dataclass(frozen=True)
+class LayoutColumn:
+    items: tuple["LayoutItem", ...]
+    item_heights_percent: tuple[float, ...] | None = None
+    overwrite_pad_x: int | None = None
+    overwrite_pad_y: int | None = None
+
+
+LayoutItem = LayoutModule | LayoutColumn
+
+
+@dataclass(frozen=True)
 class LayoutBlock:
-    modules: tuple[LayoutModule, ...]
+    kind: str
+    modules: tuple[LayoutItem, ...]
     width: int | None
     height: int | None
     height_fraction: float | None
     item_widths_percent: tuple[float, ...] | None
+    item_heights_percent: tuple[float, ...] | None
     overwrite_pad_y: int | None
 
 
@@ -537,7 +551,10 @@ def calculate_item_pad_xs(
     layout_cfg: dict[str, Any],
     block: LayoutBlock,
 ) -> tuple[int, ...]:
-    """Return each horizontal gap after an item; the final item has no gap."""
+    """Return each horizontal gap after an item in a row."""
+    if block.kind != "row":
+        return ()
+
     count = len(block.modules)
     if count <= 1:
         return ()
@@ -557,7 +574,7 @@ def calculate_layout_pad_y(
     draw_geometry: DrawGeometry,
     layout_cfg: dict[str, Any],
 ) -> int:
-    """Resolve the default vertical gap between layout blocks."""
+    """Resolve the default vertical gap between top-level page items."""
     layout = layout_cfg.get("layout", {})
     if not isinstance(layout, dict):
         raise SystemExit("[layout] must be a TOML table.")
@@ -581,7 +598,7 @@ def calculate_block_pad_y(
     block: LayoutBlock,
     is_last: bool,
 ) -> int:
-    """Return the gap after one block; the final block never has a gap."""
+    """Return the gap after one page item; the final page item has no gap."""
     if is_last:
         return 0
 
@@ -616,8 +633,9 @@ def parse_layout_module_reference(value: str, context: str) -> tuple[str, str | 
 
 
 def parse_layout_module(value: Any, context: str) -> LayoutModule:
-    """Parse a short module reference or an explicit placement object."""
+    """Parse a short module reference or an explicit module placement."""
     overwrite_pad_x: int | None = None
+    overwrite_pad_y: int | None = None
     parameters: dict[str, Any] = {}
 
     if isinstance(value, str):
@@ -646,10 +664,27 @@ def parse_layout_module(value: Any, context: str) -> LayoutModule:
 
             overwrite_pad_x = raw_overwrite_pad_x
 
+        raw_overwrite_pad_y = value.get("overwrite_pad_y")
+        if raw_overwrite_pad_y is not None:
+            if (
+                isinstance(raw_overwrite_pad_y, bool)
+                or not isinstance(raw_overwrite_pad_y, int)
+            ):
+                raise SystemExit(
+                    f"{context} overwrite_pad_y must be an integer."
+                )
+
+            if raw_overwrite_pad_y < 0:
+                raise SystemExit(
+                    f"{context} overwrite_pad_y must not be negative."
+                )
+
+            overwrite_pad_y = raw_overwrite_pad_y
+
         parameters = {
             str(key): item
             for key, item in value.items()
-            if key not in {"module", "overwrite_pad_x"}
+            if key not in {"module", "overwrite_pad_x", "overwrite_pad_y"}
         }
     else:
         raise SystemExit(
@@ -662,149 +697,332 @@ def parse_layout_module(value: Any, context: str) -> LayoutModule:
         name=name,
         instance=instance,
         overwrite_pad_x=overwrite_pad_x,
+        overwrite_pad_y=overwrite_pad_y,
         parameters=parameters,
     )
 
 
-def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
-    page_cfg = required(layout_cfg, "page", "layout.toml")
-    main_cfg = required(page_cfg, "main", "[page.main]")
-    raw_blocks = main_cfg.get("block", [])
+def parse_layout_column(value: dict[str, Any], context: str) -> LayoutColumn:
+    """Parse a vertical layout container."""
+    allowed_keys = {
+        "col",
+        "item_heights_percent",
+        "overwrite_pad_x",
+        "overwrite_pad_y",
+    }
+    unknown_keys = set(value) - allowed_keys
+    if unknown_keys:
+        unknown = ", ".join(sorted(str(key) for key in unknown_keys))
+        raise SystemExit(
+            f"{context} col contains unsupported key(s): {unknown}."
+        )
 
-    if not isinstance(raw_blocks, list):
-        raise SystemExit("[[page.main.block]] entries must form a list.")
+    raw_items = value.get("col")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise SystemExit(f"{context} col must contain a non-empty list.")
 
-    blocks: list[LayoutBlock] = []
+    items = tuple(
+        parse_layout_item(item, f"{context} col item {index}")
+        for index, item in enumerate(raw_items, start=1)
+    )
 
-    for index, raw_block in enumerate(raw_blocks, start=1):
-        raw_modules = raw_block.get("modules", [])
-
-        if not isinstance(raw_modules, list) or not raw_modules:
+    # A column has vertical siblings only. Horizontal gap overrides on its
+    # children would have no meaning.
+    for index, item in enumerate(items, start=1):
+        if item.overwrite_pad_x is not None:
             raise SystemExit(
-                f"page.main block {index} must contain a non-empty modules list."
+                f"{context} col item {index} sets overwrite_pad_x, but "
+                "column children have no horizontal sibling gap."
             )
 
-        modules: list[LayoutModule] = []
+    if items[-1].overwrite_pad_y is not None:
+        raise SystemExit(
+            f"{context} col item {len(items)} sets overwrite_pad_y, but "
+            "the final item has no vertical gap after it."
+        )
+
+    raw_heights = value.get("item_heights_percent")
+    item_heights_percent: tuple[float, ...] | None = None
+
+    if raw_heights is not None:
+        if not isinstance(raw_heights, list):
+            raise SystemExit(
+                f"{context} item_heights_percent must be a list."
+            )
+
+        if len(raw_heights) != len(items):
+            raise SystemExit(
+                f"{context} item_heights_percent must contain exactly "
+                "one value per col item."
+            )
+
+        percentages: list[float] = []
+        for raw_percent in raw_heights:
+            if (
+                isinstance(raw_percent, bool)
+                or not isinstance(raw_percent, (int, float))
+            ):
+                raise SystemExit(
+                    f"{context} item_heights_percent values must be numbers."
+                )
+
+            percent = float(raw_percent)
+            if percent <= 0:
+                raise SystemExit(
+                    f"{context} item_heights_percent values must be "
+                    "greater than zero."
+                )
+
+            percentages.append(percent)
+
+        total = sum(percentages)
+        if abs(total - 100.0) > 1e-6:
+            raise SystemExit(
+                f"{context} item_heights_percent must total 100; "
+                f"got {total:g}."
+            )
+
+        item_heights_percent = tuple(percentages)
+
+    def parse_gap_override(key: str) -> int | None:
+        raw = value.get(key)
+        if raw is None:
+            return None
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise SystemExit(f"{context} {key} must be an integer.")
+        if raw < 0:
+            raise SystemExit(f"{context} {key} must not be negative.")
+        return raw
+
+    return LayoutColumn(
+        items=items,
+        item_heights_percent=item_heights_percent,
+        overwrite_pad_x=parse_gap_override("overwrite_pad_x"),
+        overwrite_pad_y=parse_gap_override("overwrite_pad_y"),
+    )
+
+
+def parse_layout_item(value: Any, context: str) -> LayoutItem:
+    """Parse either a module placement or a vertical col container."""
+    if isinstance(value, dict) and "col" in value:
+        if "module" in value:
+            raise SystemExit(
+                f"{context} cannot define both 'module' and 'col'."
+            )
+        return parse_layout_column(value, context)
+
+    return parse_layout_module(value, context)
+
+
+
+def parse_percentages(
+    raw: Any,
+    expected_count: int,
+    context: str,
+) -> tuple[float, ...] | None:
+    """Parse an optional percentage list that must total exactly 100."""
+    if raw is None:
+        return None
+
+    if not isinstance(raw, list):
+        raise SystemExit(f"{context} must be a list.")
+
+    if len(raw) != expected_count:
+        raise SystemExit(
+            f"{context} must contain exactly one value per item."
+        )
+
+    percentages: list[float] = []
+
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SystemExit(f"{context} values must be numbers.")
+
+        percent = float(value)
+        if percent <= 0:
+            raise SystemExit(
+                f"{context} values must be greater than zero."
+            )
+
+        percentages.append(percent)
+
+    total = sum(percentages)
+    if abs(total - 100.0) > 1e-6:
+        raise SystemExit(
+            f"{context} must total 100; got {total:g}."
+        )
+
+    return tuple(percentages)
+
+
+def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
+    """Load the ordered page layout.
+
+    User-facing page syntax is an ordered list:
+
+        [[page.main.item]]
+        type = "row"
+
+        [[page.main.item]]
+        type = "col"
+
+    This preserves arbitrary row/col ordering.
+    """
+    page_cfg = required(layout_cfg, "page", "layout.toml")
+    main_cfg = required(page_cfg, "main", "[page.main]")
+
+    if "block" in main_cfg:
+        raise SystemExit(
+            "[[page.main.block]] has been replaced by [[page.main.item]]. "
+            'Set type = "row" or type = "col" on each page item.'
+        )
+
+    raw_items = main_cfg.get("item", [])
+
+    if not isinstance(raw_items, list):
+        raise SystemExit("[[page.main.item]] entries must form a list.")
+
+    page_items: list[LayoutBlock] = []
+
+    for index, raw_item in enumerate(raw_items, start=1):
+        if not isinstance(raw_item, dict):
+            raise SystemExit(f"page.main item {index} must be a TOML table.")
+
+        kind = raw_item.get("type")
+        if kind not in {"row", "col"}:
+            raise SystemExit(
+                f"page.main item {index} type must be \"row\" or \"col\"."
+            )
+
+        raw_modules = raw_item.get("modules", [])
+        if not isinstance(raw_modules, list) or not raw_modules:
+            raise SystemExit(
+                f"page.main {kind} {index} must contain a non-empty modules list."
+            )
+
+        modules: list[LayoutItem] = []
         for module_index, value in enumerate(raw_modules, start=1):
             modules.append(
-                parse_layout_module(
+                parse_layout_item(
                     value,
-                    f"page.main block {index} module {module_index}",
+                    f"page.main {kind} {index} item {module_index}",
                 )
             )
 
-        if modules[-1].overwrite_pad_x is not None:
-            raise SystemExit(
-                f"page.main block {index} module {len(modules)} sets "
-                "overwrite_pad_x, but the final module has no horizontal gap after it."
-            )
+        if kind == "row":
+            if modules[-1].overwrite_pad_x is not None:
+                raise SystemExit(
+                    f"page.main row {index} item {len(modules)} sets "
+                    "overwrite_pad_x, but the final item has no horizontal "
+                    "gap after it."
+                )
 
-        raw_width = raw_block.get("width")
+            for module_index, item in enumerate(modules, start=1):
+                if item.overwrite_pad_y is not None:
+                    raise SystemExit(
+                        f"page.main row {index} item {module_index} sets "
+                        "overwrite_pad_y, but row children have no vertical "
+                        "sibling gap."
+                    )
+        else:
+            if modules[-1].overwrite_pad_y is not None:
+                raise SystemExit(
+                    f"page.main col {index} item {len(modules)} sets "
+                    "overwrite_pad_y, but the final item has no vertical "
+                    "gap after it."
+                )
+
+            for module_index, item in enumerate(modules, start=1):
+                if item.overwrite_pad_x is not None:
+                    raise SystemExit(
+                        f"page.main col {index} item {module_index} sets "
+                        "overwrite_pad_x, but col children have no horizontal "
+                        "sibling gap."
+                    )
+
+        raw_width = raw_item.get("width")
         width: int | None = None
 
         if raw_width is not None:
             if isinstance(raw_width, bool) or not isinstance(raw_width, int):
                 raise SystemExit(
-                    f"page.main block {index} width must be an integer."
+                    f"page.main {kind} {index} width must be an integer."
                 )
-
             if raw_width <= 0:
                 raise SystemExit(
-                    f"page.main block {index} width must be greater than zero."
+                    f"page.main {kind} {index} width must be greater than zero."
                 )
-
             width = raw_width
 
-        raw_height = raw_block.get("height")
+        raw_height = raw_item.get("height")
         height: int | None = None
 
         if raw_height is not None:
             if isinstance(raw_height, bool) or not isinstance(raw_height, int):
                 raise SystemExit(
-                    f"page.main block {index} height must be an integer."
+                    f"page.main {kind} {index} height must be an integer."
                 )
-
             if raw_height <= 0:
                 raise SystemExit(
-                    f"page.main block {index} height must be greater than zero."
+                    f"page.main {kind} {index} height must be greater than zero."
                 )
-
             height = raw_height
 
-        raw_height_fraction = raw_block.get("height_fraction")
+        raw_height_fraction = raw_item.get("height_fraction")
         height_fraction: float | None = None
 
         if raw_height_fraction is not None:
             if isinstance(raw_height_fraction, bool) or not isinstance(
-                raw_height_fraction, (int, float)
+                raw_height_fraction,
+                (int, float),
             ):
                 raise SystemExit(
-                    f"page.main block {index} height_fraction must be a number."
+                    f"page.main {kind} {index} height_fraction must be a number."
                 )
 
             height_fraction = float(raw_height_fraction)
-
             if height_fraction <= 0 or height_fraction > 1:
                 raise SystemExit(
-                    f"page.main block {index} height_fraction must be "
+                    f"page.main {kind} {index} height_fraction must be "
                     "greater than 0 and at most 1."
                 )
 
         if height is not None and height_fraction is not None:
             raise SystemExit(
-                f"page.main block {index} cannot set both height and "
+                f"page.main {kind} {index} cannot set both height and "
                 "height_fraction."
             )
 
-        raw_item_widths = raw_block.get("item_widths_percent")
-        item_widths_percent: tuple[float, ...] | None = None
+        item_widths_percent = parse_percentages(
+            raw_item.get("item_widths_percent"),
+            len(modules),
+            f"page.main row {index} item_widths_percent",
+        )
+        item_heights_percent = parse_percentages(
+            raw_item.get("item_heights_percent"),
+            len(modules),
+            f"page.main col {index} item_heights_percent",
+        )
 
-        if raw_item_widths is not None:
-            if not isinstance(raw_item_widths, list):
-                raise SystemExit(
-                    f"page.main block {index} item_widths_percent must be a list."
-                )
-
-            if len(raw_item_widths) != len(modules):
-                raise SystemExit(
-                    f"page.main block {index} item_widths_percent must contain "
-                    "exactly one value per module."
-                )
-
-            percentages: list[float] = []
-            for value in raw_item_widths:
-                if isinstance(value, bool) or not isinstance(value, (int, float)):
-                    raise SystemExit(
-                        f"page.main block {index} item_widths_percent values "
-                        "must be numbers."
-                    )
-
-                percent = float(value)
-                if percent <= 0:
-                    raise SystemExit(
-                        f"page.main block {index} item_widths_percent values "
-                        "must be greater than zero."
-                    )
-
-                percentages.append(percent)
-
-            total = sum(percentages)
-            if abs(total - 100.0) > 1e-6:
-                raise SystemExit(
-                    f"page.main block {index} item_widths_percent must total "
-                    f"100; got {total:g}."
-                )
-
-            item_widths_percent = tuple(percentages)
-
-        if "overwrite_pad_x" in raw_block:
+        if kind == "row" and item_heights_percent is not None:
             raise SystemExit(
-                f"page.main block {index} overwrite_pad_x is no longer a block "
-                "property. Put it on the module placement that owns the gap, for "
-                "example: { module = \"color-block:red\", overwrite_pad_x = 15 }."
+                f"page.main row {index} cannot set item_heights_percent; "
+                "use item_widths_percent."
             )
 
-        raw_overwrite_pad_y = raw_block.get("overwrite_pad_y")
+        if kind == "col" and item_widths_percent is not None:
+            raise SystemExit(
+                f"page.main col {index} cannot set item_widths_percent; "
+                "use item_heights_percent."
+            )
+
+        if "overwrite_pad_x" in raw_item:
+            raise SystemExit(
+                f"page.main {kind} {index} overwrite_pad_x is not a page-item "
+                "property. Put it on the row child that owns the horizontal gap."
+            )
+
+        raw_overwrite_pad_y = raw_item.get("overwrite_pad_y")
         overwrite_pad_y: int | None = None
 
         if raw_overwrite_pad_y is not None:
@@ -813,29 +1031,28 @@ def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
                 or not isinstance(raw_overwrite_pad_y, int)
             ):
                 raise SystemExit(
-                    f"page.main block {index} overwrite_pad_y must be an integer."
+                    f"page.main {kind} {index} overwrite_pad_y must be an integer."
                 )
-
             if raw_overwrite_pad_y < 0:
                 raise SystemExit(
-                    f"page.main block {index} overwrite_pad_y must not be negative."
+                    f"page.main {kind} {index} overwrite_pad_y must not be negative."
                 )
-
             overwrite_pad_y = raw_overwrite_pad_y
 
-        blocks.append(
+        page_items.append(
             LayoutBlock(
+                kind=kind,
                 modules=tuple(modules),
                 width=width,
                 height=height,
                 height_fraction=height_fraction,
                 item_widths_percent=item_widths_percent,
+                item_heights_percent=item_heights_percent,
                 overwrite_pad_y=overwrite_pad_y,
             )
         )
 
-    return blocks
-
+    return page_items
 
 def load_module_manifest(modules_dir: Path, name: str) -> ModuleManifest:
     module_dir = modules_dir / name
@@ -948,10 +1165,10 @@ def load_enabled_modules(
     blocks: list[LayoutBlock],
     modules_dir: Path,
 ) -> dict[str, ModuleManifest]:
-    """Load top-level modules and recursively declared single-child wrappers."""
+    """Load modules referenced by rows, cols, and wrapper children."""
     manifests: dict[str, ModuleManifest] = {}
 
-    def register(module: LayoutModule, context: str) -> None:
+    def register_module(module: LayoutModule, context: str) -> None:
         manifest = manifests.get(module.name)
         if manifest is None:
             manifest = load_module_manifest(modules_dir, module.name)
@@ -972,23 +1189,31 @@ def load_enabled_modules(
             child_raw,
             f"{context} module '{module.name}' child",
         )
-        if child.overwrite_pad_x is not None:
+        if child.overwrite_pad_x is not None or child.overwrite_pad_y is not None:
             raise SystemExit(
-                f"{context} module '{module.name}' child sets overwrite_pad_x, "
-                "but a single wrapped child has no horizontal sibling gap."
+                f"{context} module '{module.name}' child cannot set "
+                "overwrite_pad_x/overwrite_pad_y because a single wrapped "
+                "child has no sibling gap."
             )
 
-        register(child, f"{context} module '{module.name}' child")
+        register_module(child, f"{context} module '{module.name}' child")
+
+    def register_item(item: LayoutItem, context: str) -> None:
+        if isinstance(item, LayoutColumn):
+            for index, child in enumerate(item.items, start=1):
+                register_item(child, f"{context} col item {index}")
+            return
+
+        register_module(item, context)
 
     for block_index, block in enumerate(blocks, start=1):
-        for item_index, module in enumerate(block.modules, start=1):
-            register(
-                module,
-                f"page.main block {block_index} module {item_index}",
+        for item_index, item in enumerate(block.modules, start=1):
+            register_item(
+                item,
+                f"page.main block {block_index} item {item_index}",
             )
 
     return manifests
-
 
 def expand_string(value: str, context: dict[str, str]) -> str:
     result = value
@@ -1054,6 +1279,9 @@ def calculate_item_widths(
     layout_cfg: dict[str, Any],
     block: LayoutBlock,
 ) -> tuple[int, ...]:
+    if block.kind != "row":
+        raise SystemExit("Internal error: horizontal widths requested for a col.")
+
     block_width = calculate_block_width(draw_geometry, block)
     count = len(block.modules)
 
@@ -1112,6 +1340,135 @@ def calculate_item_widths(
     return widths
 
 
+
+def calculate_col_item_pad_ys(
+    draw_geometry: DrawGeometry,
+    layout_cfg: dict[str, Any],
+    col: LayoutColumn,
+) -> tuple[int, ...]:
+    """Return each vertical gap after a col item; the final item has no gap."""
+    count = len(col.items)
+    if count <= 1:
+        return ()
+
+    inherited_pad_y = calculate_layout_pad_y(draw_geometry, layout_cfg)
+    return tuple(
+        (
+            item.overwrite_pad_y
+            if item.overwrite_pad_y is not None
+            else inherited_pad_y
+        )
+        for item in col.items[:-1]
+    )
+
+
+def calculate_col_item_heights(
+    allocated_height: int,
+    draw_geometry: DrawGeometry,
+    layout_cfg: dict[str, Any],
+    col: LayoutColumn,
+    context: str,
+) -> tuple[int, ...]:
+    """Split a col's allocated height after reserving all vertical gaps."""
+    count = len(col.items)
+
+    if count == 1:
+        return (allocated_height,)
+
+    item_pad_ys = calculate_col_item_pad_ys(
+        draw_geometry,
+        layout_cfg,
+        col,
+    )
+    total_pad_y = sum(item_pad_ys)
+
+    # Leave at least one pixel for every child after all vertical gaps.
+    if total_pad_y + count > allocated_height:
+        raise SystemExit(
+            f"Vertical col layout has no usable item height in {context}: "
+            f"height={allocated_height}px, items={count}, "
+            f"pad-y-total={total_pad_y}px, pad-y={list(item_pad_ys)}."
+        )
+
+    available_height = allocated_height - total_pad_y
+
+    if col.item_heights_percent is None:
+        base = available_height // count
+        remainder = available_height % count
+        heights = tuple(
+            base + (1 if index < remainder else 0)
+            for index in range(count)
+        )
+    else:
+        resolved: list[int] = []
+        used = 0
+
+        for index, percent in enumerate(col.item_heights_percent):
+            if index == count - 1:
+                height = available_height - used
+            else:
+                height = round(available_height * percent / 100.0)
+                used += height
+
+            resolved.append(height)
+
+        heights = tuple(resolved)
+
+    for index, height in enumerate(heights, start=1):
+        if height <= 0:
+            raise SystemExit(
+                f"Vertical col item {index} in {context} resolved to "
+                f"{height}px; every item must receive at least 1px."
+            )
+
+    if sum(heights) + total_pad_y != allocated_height:
+        raise SystemExit(
+            f"Internal vertical col layout error in {context}: item heights "
+            "and pad_y do not exactly fill the inherited height."
+        )
+
+    return heights
+
+
+
+def block_as_column(block: LayoutBlock) -> LayoutColumn:
+    if block.kind != "col":
+        raise SystemExit("Internal error: row cannot be converted to a col.")
+
+    return LayoutColumn(
+        items=block.modules,
+        item_heights_percent=block.item_heights_percent,
+    )
+
+
+def calculate_top_col_item_heights(
+    allocated_height: int,
+    draw_geometry: DrawGeometry,
+    layout_cfg: dict[str, Any],
+    block: LayoutBlock,
+    context: str,
+) -> tuple[int, ...]:
+    return calculate_col_item_heights(
+        allocated_height,
+        draw_geometry,
+        layout_cfg,
+        block_as_column(block),
+        context,
+    )
+
+
+def calculate_top_col_item_pad_ys(
+    draw_geometry: DrawGeometry,
+    layout_cfg: dict[str, Any],
+    block: LayoutBlock,
+) -> tuple[int, ...]:
+    return calculate_col_item_pad_ys(
+        draw_geometry,
+        layout_cfg,
+        block_as_column(block),
+    )
+
+
 def calculate_block_height(
     draw_geometry: DrawGeometry,
     block: LayoutBlock,
@@ -1131,7 +1488,7 @@ def validate_vertical_layout(
     layout_cfg: dict[str, Any],
     blocks: list[LayoutBlock],
 ) -> int:
-    """Ensure fixed layout allocations and their inter-block gaps fit vertically."""
+    """Ensure fixed page-item allocations and their vertical gaps fit vertically."""
     module_height = 0
     padding_height = 0
 
@@ -1140,7 +1497,7 @@ def validate_vertical_layout(
         if height is None:
             raise SystemExit(
                 f"Cannot validate vertical layout for monitor '{monitor.name}': "
-                f"block {index + 1} has auto height. Set height or height_fraction."
+                f"page item {index + 1} has auto height. Set height or height_fraction."
             )
 
         module_height += height
@@ -1198,8 +1555,10 @@ def generator_context(
         "placement": {
             "id": placement_id,
             "page": "main",
-            "block": block_index,
+            "page_item": block_index,
+            "container": block.kind,
             "item": item_index + 1,
+            "block": block_index,
             "parameters": placement_parameters,
         },
         "monitor": {
@@ -1221,6 +1580,8 @@ def generator_context(
         },
         "layout": {
             "page": "main",
+            "page_item": block_index,
+            "container": block.kind,
             "block": block_index,
             "width": allocated_width,
             "height": allocated_height,
@@ -1529,10 +1890,13 @@ def build_layout_for_monitor(
                 child_raw,
                 f"wrapper '{module_ref.reference}' child",
             )
-            if child_ref.overwrite_pad_x is not None:
+            if (
+                child_ref.overwrite_pad_x is not None
+                or child_ref.overwrite_pad_y is not None
+            ):
                 raise SystemExit(
                     f"Wrapper module '{manifest.name}' child cannot set "
-                    "overwrite_pad_x because it has no horizontal sibling."
+                    "overwrite_pad_x/overwrite_pad_y because it has no sibling."
                 )
 
             child_width = allocated_width - (2 * child_inset)
@@ -1582,40 +1946,79 @@ def build_layout_for_monitor(
 
         return root
 
-    for block_index, block in enumerate(blocks, start=1):
-        row_modules: list[str] = []
-        item_widths = calculate_item_widths(draw_geometry, layout_cfg, block)
-        item_pad_xs = calculate_item_pad_xs(
-            draw_geometry,
-            layout_cfg,
-            block,
-        )
-        block_height = calculate_block_height(draw_geometry, block)
-        if block_height is None:
-            raise SystemExit(
-                f"page.main block {block_index} does not resolve to a fixed "
-                "height; nested module geometry requires a concrete height."
-            )
-
-        for item_index, module_ref in enumerate(block.modules):
-            allocated_width = item_widths[item_index]
-            placement_id = f"main-b{block_index}-i{item_index + 1}"
-            root = render_placement(
-                module_ref,
+    def render_layout_item(
+        item: LayoutItem,
+        block: LayoutBlock,
+        block_index: int,
+        item_index: int,
+        placement_id: str,
+        allocated_width: int,
+        allocated_height: int,
+        nested: bool = False,
+    ) -> str:
+        if isinstance(item, LayoutModule):
+            return render_placement(
+                item,
                 block,
                 block_index,
                 item_index,
                 placement_id,
                 allocated_width,
-                block_height,
+                allocated_height,
+                nested,
             )
-            row_modules.append(root)
 
-            if item_index < len(block.modules) - 1:
-                pad_x = item_pad_xs[item_index]
-                if pad_x > 0:
+        col = item
+        child_heights = calculate_col_item_heights(
+            allocated_height,
+            draw_geometry,
+            layout_cfg,
+            col,
+            placement_id,
+        )
+        child_pad_ys = calculate_col_item_pad_ys(
+            draw_geometry,
+            layout_cfg,
+            col,
+        )
+
+        col_modules: list[str] = []
+        col_css: list[str] = []
+        selector = f"window#waybar.sidebar-{css_safe(monitor.name)}"
+        group_name = f"group/layout-col-{placement_id}"
+
+        col_css.extend(
+            [
+                f"{selector} #group-layout-col-{placement_id} {{",
+                f"    min-width: {allocated_width}px;",
+                f"    min-height: {allocated_height}px;",
+                "    padding: 0;",
+                "    margin: 0;",
+                "}",
+                "",
+            ]
+        )
+
+        for child_index, child in enumerate(col.items):
+            child_id = f"{placement_id}-v{child_index + 1}"
+            child_root = render_layout_item(
+                child,
+                block,
+                block_index,
+                item_index,
+                child_id,
+                allocated_width,
+                child_heights[child_index],
+                True,
+            )
+            col_modules.append(child_root)
+
+            if child_index < len(col.items) - 1:
+                pad_y = child_pad_ys[child_index]
+                if pad_y > 0:
                     spacer_name = (
-                        f"custom/layout-pad-x-{block_index}-{item_index + 1}"
+                        f"custom/layout-col-pad-y-"
+                        f"{placement_id}-{child_index + 1}"
                     )
                     add_entry(
                         bar,
@@ -1627,21 +2030,218 @@ def build_layout_for_monitor(
                         "core-layout",
                         owners,
                     )
-                    row_modules.append(spacer_name)
+                    col_modules.append(spacer_name)
 
-        group_name = f"group/layout-main-block-{block_index}"
-        group_options = {
-            "orientation": "horizontal",
-            "modules": row_modules,
-        }
+                    col_css.extend(
+                        [
+                            f"{selector} #custom-layout-col-pad-y-"
+                            f"{placement_id}-{child_index + 1} {{",
+                            f"    min-height: {pad_y}px;",
+                            "    min-width: 1px;",
+                            "    padding: 0;",
+                            "    margin: 0;",
+                            "    font-size: 1px;",
+                            "}",
+                            "",
+                        ]
+                    )
+
         add_entry(
             bar,
             group_name,
-            group_options,
+            {
+                "orientation": "vertical",
+                "modules": col_modules,
+            },
+            "core-layout",
+            owners,
+        )
+
+        generated_css.append(
+            (
+                f"core-layout-col@{placement_id}",
+                "\n".join(col_css).rstrip(),
+            )
+        )
+        return group_name
+
+    for block_index, block in enumerate(blocks, start=1):
+        block_width = calculate_block_width(draw_geometry, block)
+        block_height = calculate_block_height(draw_geometry, block)
+
+        if block_height is None:
+            raise SystemExit(
+                f"page.main {block.kind} {block_index} does not resolve to a "
+                "fixed height; nested module geometry requires a concrete height."
+            )
+
+        container_modules: list[str] = []
+        selector = f"window#waybar.sidebar-{css_safe(monitor.name)}"
+
+        if block.kind == "row":
+            item_widths = calculate_item_widths(
+                draw_geometry,
+                layout_cfg,
+                block,
+            )
+            item_pad_xs = calculate_item_pad_xs(
+                draw_geometry,
+                layout_cfg,
+                block,
+            )
+
+            for item_index, layout_item in enumerate(block.modules):
+                allocated_width = item_widths[item_index]
+                placement_id = f"main-r{block_index}-i{item_index + 1}"
+                root = render_layout_item(
+                    layout_item,
+                    block,
+                    block_index,
+                    item_index,
+                    placement_id,
+                    allocated_width,
+                    block_height,
+                )
+                container_modules.append(root)
+
+                if item_index < len(block.modules) - 1:
+                    pad_x = item_pad_xs[item_index]
+                    if pad_x > 0:
+                        spacer_name = (
+                            f"custom/layout-row-pad-x-"
+                            f"{block_index}-{item_index + 1}"
+                        )
+                        add_entry(
+                            bar,
+                            spacer_name,
+                            {
+                                "format": " ",
+                                "tooltip": False,
+                            },
+                            "core-layout",
+                            owners,
+                        )
+                        container_modules.append(spacer_name)
+
+                        generated_css.append(
+                            (
+                                f"core-layout-row-gap@main-r{block_index}-"
+                                f"{item_index + 1}",
+                                "\n".join(
+                                    [
+                                        f"{selector} #custom-layout-row-pad-x-"
+                                        f"{block_index}-{item_index + 1} {{",
+                                        f"    min-width: {pad_x}px;",
+                                        "    min-height: 1px;",
+                                        "    padding: 0;",
+                                        "    margin: 0;",
+                                        "    font-size: 1px;",
+                                        "}",
+                                    ]
+                                ),
+                            )
+                        )
+
+            group_name = f"group/layout-main-row-{block_index}"
+            orientation = "horizontal"
+
+        else:
+            item_heights = calculate_top_col_item_heights(
+                block_height,
+                draw_geometry,
+                layout_cfg,
+                block,
+                f"page.main col {block_index}",
+            )
+            item_pad_ys = calculate_top_col_item_pad_ys(
+                draw_geometry,
+                layout_cfg,
+                block,
+            )
+
+            for item_index, layout_item in enumerate(block.modules):
+                allocated_height = item_heights[item_index]
+                placement_id = f"main-c{block_index}-i{item_index + 1}"
+                root = render_layout_item(
+                    layout_item,
+                    block,
+                    block_index,
+                    item_index,
+                    placement_id,
+                    block_width,
+                    allocated_height,
+                )
+                container_modules.append(root)
+
+                if item_index < len(block.modules) - 1:
+                    pad_y = item_pad_ys[item_index]
+                    if pad_y > 0:
+                        spacer_name = (
+                            f"custom/layout-col-pad-y-main-"
+                            f"{block_index}-{item_index + 1}"
+                        )
+                        add_entry(
+                            bar,
+                            spacer_name,
+                            {
+                                "format": " ",
+                                "tooltip": False,
+                            },
+                            "core-layout",
+                            owners,
+                        )
+                        container_modules.append(spacer_name)
+
+                        generated_css.append(
+                            (
+                                f"core-layout-col-gap@main-c{block_index}-"
+                                f"{item_index + 1}",
+                                "\n".join(
+                                    [
+                                        f"{selector} #custom-layout-col-pad-y-main-"
+                                        f"{block_index}-{item_index + 1} {{",
+                                        f"    min-height: {pad_y}px;",
+                                        "    min-width: 1px;",
+                                        "    padding: 0;",
+                                        "    margin: 0;",
+                                        "    font-size: 1px;",
+                                        "}",
+                                    ]
+                                ),
+                            )
+                        )
+
+            group_name = f"group/layout-main-col-{block_index}"
+            orientation = "vertical"
+
+        add_entry(
+            bar,
+            group_name,
+            {
+                "orientation": orientation,
+                "modules": container_modules,
+            },
             "core-layout",
             owners,
         )
         frame_modules.append(group_name)
+
+        generated_css.append(
+            (
+                f"core-layout-{block.kind}@main-{block_index}",
+                "\n".join(
+                    [
+                        f"{selector} #group-layout-main-{block.kind}-"
+                        f"{block_index} {{",
+                        f"    min-width: {block_width}px;",
+                        f"    min-height: {block_height}px;",
+                        "    padding: 0;",
+                        "    margin: 0;",
+                        "}",
+                    ]
+                ),
+            )
+        )
 
         block_pad_y = calculate_block_pad_y(
             draw_geometry,
@@ -1651,7 +2251,7 @@ def build_layout_for_monitor(
         )
 
         if block_pad_y > 0:
-            spacer_name = f"custom/layout-pad-y-{block_index}"
+            spacer_name = f"custom/layout-page-pad-y-{block_index}"
             add_entry(
                 bar,
                 spacer_name,
@@ -1663,6 +2263,24 @@ def build_layout_for_monitor(
                 owners,
             )
             frame_modules.append(spacer_name)
+
+            generated_css.append(
+                (
+                    f"core-layout-page-gap@{block_index}",
+                    "\n".join(
+                        [
+                            f"{selector} #custom-layout-page-pad-y-"
+                            f"{block_index} {{",
+                            f"    min-height: {block_pad_y}px;",
+                            "    min-width: 1px;",
+                            "    padding: 0;",
+                            "    margin: 0;",
+                            "    font-size: 1px;",
+                            "}",
+                        ]
+                    ),
+                )
+            )
 
     frame_name = "group/sidebar-inner-frame"
     add_entry(
@@ -1829,82 +2447,10 @@ def generate_core_css(
             blocks,
         )
 
-        for block_index, block in enumerate(blocks, start=1):
-            block_width = calculate_block_width(
-                draw_geometry,
-                block,
-            )
-            block_height = calculate_block_height(
-                draw_geometry,
-                block,
-            )
-            item_pad_xs = calculate_item_pad_xs(
-                draw_geometry,
-                layout_cfg,
-                block,
-            )
-            calculate_item_widths(draw_geometry, layout_cfg, block)
-            block_pad_y = calculate_block_pad_y(
-                draw_geometry,
-                layout_cfg,
-                block,
-                is_last=block_index == len(blocks),
-            )
+        # Exact row/col group and spacer geometry is emitted while
+        # building each monitor layout, because nested containers need the
+        # same recursive mechanism.
 
-            lines.extend(
-                [
-                    f"{selector} #group-layout-main-block-{block_index} {{",
-                    f"    min-width: {block_width}px;",
-                ]
-            )
-
-            if block_height is not None:
-                lines.append(f"    min-height: {block_height}px;")
-
-            lines.extend(
-                [
-                    "}",
-                    "",
-                ]
-            )
-
-            for gap_index, pad_x in enumerate(item_pad_xs, start=1):
-                if pad_x <= 0:
-                    continue
-
-                spacer_selector = (
-                    f"{selector} #custom-layout-pad-x-"
-                    f"{block_index}-{gap_index}"
-                )
-                lines.extend(
-                    [
-                        f"{spacer_selector} {{",
-                        f"    min-width: {pad_x}px;",
-                        "    min-height: 1px;",
-                        "    padding: 0;",
-                        "    margin: 0;",
-                        "    font-size: 1px;",
-                        "}",
-                        "",
-                    ]
-                )
-
-            if block_pad_y > 0:
-                spacer_selector = (
-                    f"{selector} #custom-layout-pad-y-{block_index}"
-                )
-                lines.extend(
-                    [
-                        f"{spacer_selector} {{",
-                        f"    min-height: {block_pad_y}px;",
-                        "    min-width: 1px;",
-                        "    padding: 0;",
-                        "    margin: 0;",
-                        "    font-size: 1px;",
-                        "}",
-                        "",
-                    ]
-                )
 
     return "\n".join(lines)
 
@@ -2001,55 +2547,83 @@ def print_summary(
 
     print()
     print("Layout:")
-    for index, block in enumerate(blocks, start=1):
-        width = "full" if block.width is None else f"{block.width}px"
 
-        if block.height is not None:
-            height = f"{block.height}px"
-        elif block.height_fraction is None:
+    def summarize_nested(item: LayoutItem) -> str:
+        if isinstance(item, LayoutModule):
+            return item.reference
+
+        heights = (
+            "equal"
+            if item.item_heights_percent is None
+            else "["
+            + ", ".join(f"{value:g}%" for value in item.item_heights_percent)
+            + "]"
+        )
+        children = ", ".join(
+            summarize_nested(child)
+            for child in item.items
+        )
+        return f"col[{children}; heights={heights}]"
+
+    for index, page_item in enumerate(blocks, start=1):
+        width = "full" if page_item.width is None else f"{page_item.width}px"
+
+        if page_item.height is not None:
+            height = f"{page_item.height}px"
+        elif page_item.height_fraction is None:
             height = "auto"
         else:
             resolved = ", ".join(
                 f"{monitor.name}="
-                f"{calculate_block_height(calculate_draw_geometry(calculate_geometry(monitor, waybar_cfg), layout_cfg), block)}px"
+                f"{calculate_block_height(calculate_draw_geometry(calculate_geometry(monitor, waybar_cfg), layout_cfg), page_item)}px"
                 for monitor in monitors
             )
             height = (
-                f"{block.height_fraction:.4f} of usable height; "
+                f"{page_item.height_fraction:.4f} of usable height; "
                 f"{resolved}"
             )
 
-        item_widths = (
-            "equal"
-            if block.item_widths_percent is None
-            else "[" + ", ".join(f"{value:g}%" for value in block.item_widths_percent) + "]"
+        children = ", ".join(
+            summarize_nested(item)
+            for item in page_item.modules
         )
 
-        module_summary = []
-        for module_index, module in enumerate(block.modules):
-            module_text = module.reference
-            if module_index < len(block.modules) - 1:
-                pad_x = (
-                    "inherit"
-                    if module.overwrite_pad_x is None
-                    else f"{module.overwrite_pad_x}px"
+        if page_item.kind == "row":
+            split = (
+                "equal"
+                if page_item.item_widths_percent is None
+                else "["
+                + ", ".join(
+                    f"{value:g}%"
+                    for value in page_item.item_widths_percent
                 )
-                module_text += f"{{pad-x={pad_x}}}"
-            module_summary.append(module_text)
+                + "]"
+            )
+            split_text = f"item-widths={split}"
+        else:
+            split = (
+                "equal"
+                if page_item.item_heights_percent is None
+                else "["
+                + ", ".join(
+                    f"{value:g}%"
+                    for value in page_item.item_heights_percent
+                )
+                + "]"
+            )
+            split_text = f"item-heights={split}"
 
         pad_y = (
             "inherit"
-            if block.overwrite_pad_y is None
-            else f"{block.overwrite_pad_y}px"
+            if page_item.overwrite_pad_y is None
+            else f"{page_item.overwrite_pad_y}px"
         )
 
         print(
-            f"  block {index}: "
-            f"{', '.join(module_summary)} "
-            f"(width={width}, item-widths={item_widths}, "
-            f"height={height}, overwrite-pad-y={pad_y})"
+            f"  {page_item.kind} {index}: {children} "
+            f"(width={width}, {split_text}, height={height}, "
+            f"overwrite-pad-y={pad_y})"
         )
-
 
 def main() -> int:
     args = parse_args()
