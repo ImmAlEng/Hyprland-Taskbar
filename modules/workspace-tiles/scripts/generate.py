@@ -94,6 +94,10 @@ def main() -> int:
     if not isinstance(layout, dict):
         fail("layout context must be an object")
 
+    phase = context.get("phase", "render")
+    if phase not in {"render", "measure"}:
+        fail(f"unsupported generator phase: {phase}")
+
     monitor_name = str(monitor["name"])
     monitor_css = str(monitor["css"])
     monitor_slot = str(monitor["slot"])
@@ -109,11 +113,6 @@ def main() -> int:
     allocated_width = require_dimension(
         layout,
         "width",
-        placement_id,
-    )
-    allocated_height = require_dimension(
-        layout,
-        "height",
         placement_id,
     )
 
@@ -210,6 +209,17 @@ def main() -> int:
         top_gap
         + rows * tile_outer_height
         + max(0, rows - 1) * row_gap
+    )
+
+    if phase == "measure":
+        json.dump({"height": used_height}, sys.stdout)
+        sys.stdout.write("\n")
+        return 0
+
+    allocated_height = require_dimension(
+        layout,
+        "height",
+        placement_id,
     )
 
     if used_height > allocated_height:

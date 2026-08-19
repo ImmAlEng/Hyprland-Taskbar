@@ -128,6 +128,7 @@ class LayoutBlock:
     height: int | None
     height_percent: float | None
     height_remaining: bool
+    height_content: bool
     item_widths_percent: tuple[float, ...] | None
     item_heights_percent: tuple[float, ...] | None
     overwrite_pad_y: int | None
@@ -1273,18 +1274,24 @@ def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
         raw_height = raw_item.get("height")
         height: int | None = None
         height_remaining = False
+        height_content = False
 
         if raw_height is not None:
             if isinstance(raw_height, str):
-                if raw_height != "remaining":
+                if raw_height == "remaining":
+                    height_remaining = True
+                elif raw_height == "content":
+                    height_content = True
+                else:
                     raise SystemExit(
-                        f'page.main {kind} {index} height string value must be "remaining".'
+                        f'page.main {kind} {index} height string value must be '
+                        '"remaining" or "content".'
                     )
-                height_remaining = True
             else:
                 if isinstance(raw_height, bool) or not isinstance(raw_height, int):
                     raise SystemExit(
-                        f'page.main {kind} {index} height must be a positive integer or "remaining".'
+                        f'page.main {kind} {index} height must be a positive integer, '
+                        '"remaining", or "content".'
                     )
                 if raw_height <= 0:
                     raise SystemExit(
@@ -1321,19 +1328,32 @@ def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
             int(height is not None)
             + int(height_percent is not None)
             + int(height_remaining)
+            + int(height_content)
         )
 
         if mode_count > 1:
             raise SystemExit(
                 f"page.main {kind} {index} may set only one of height=<px>, "
-                'height_percent=<percent>, or height="remaining".'
+                'height_percent=<percent>, height="remaining", or height="content".'
             )
 
         if mode_count == 0:
             raise SystemExit(
                 f"page.main {kind} {index} must set height=<px>, "
-                'height_percent=<percent>, or height="remaining".'
+                'height_percent=<percent>, height="remaining", or height="content".'
             )
+
+        if height_content:
+            if kind != "row":
+                raise SystemExit(
+                    f'page.main {kind} {index} height="content" currently supports '
+                    "only row items."
+                )
+            if len(modules) != 1 or not isinstance(modules[0], LayoutModule):
+                raise SystemExit(
+                    f'page.main row {index} height="content" currently requires '
+                    "exactly one direct module."
+                )
 
         item_widths_percent = parse_percentages(
             raw_item.get("item_widths_percent"),
@@ -1431,6 +1451,7 @@ def load_layout(layout_cfg: dict[str, Any]) -> list[LayoutBlock]:
                 height=height,
                 height_percent=height_percent,
                 height_remaining=height_remaining,
+                height_content=height_content,
                 item_widths_percent=item_widths_percent,
                 item_heights_percent=item_heights_percent,
                 overwrite_pad_y=overwrite_pad_y,
@@ -2084,8 +2105,21 @@ def resolve_page_heights(
     layout_cfg: dict[str, Any],
     blocks: list[LayoutBlock],
     context: str,
+    content_heights: dict[int, int] | None = None,
 ) -> tuple[tuple[int, ...], int]:
-    """Resolve top-level page heights using px, percent, and remaining."""
+    """Resolve top-level page heights using px, content, percent, and remaining."""
+    content_heights = content_heights or {}
+
+    for block_index, block in enumerate(blocks):
+        if not block.height_content:
+            continue
+
+        measured = content_heights.get(block_index)
+        if isinstance(measured, bool) or not isinstance(measured, int) or measured <= 0:
+            raise SystemExit(
+                f'page.main item {block_index + 1} uses height="content" on '
+                f"{context}, but no positive measured height was provided."
+            )
     padding_height = sum(
         calculate_block_pad_y(
             draw_geometry,
@@ -2106,9 +2140,13 @@ def resolve_page_heights(
         )
 
     fixed_height = sum(
-        block.height
-        for block in blocks
-        if block.height is not None
+        (
+            block.height
+            if block.height is not None
+            else content_heights[index]
+        )
+        for index, block in enumerate(blocks)
+        if block.height is not None or block.height_content
     )
     flexible_pool = available - fixed_height
 
@@ -2150,8 +2188,14 @@ def resolve_page_heights(
         )
 
     heights: list[int] = [
-        block.height if block.height is not None else 0
-        for block in blocks
+        (
+            block.height
+            if block.height is not None
+            else content_heights[index]
+            if block.height_content
+            else 0
+        )
+        for index, block in enumerate(blocks)
     ]
 
     used_percent = 0
@@ -2203,22 +2247,6 @@ def resolve_page_heights(
 
     return tuple(heights), remaining_height
 
-def validate_vertical_layout(
-    monitor: Monitor,
-    draw_geometry: DrawGeometry,
-    layout_cfg: dict[str, Any],
-    blocks: list[LayoutBlock],
-) -> int:
-    """Validate and resolve the complete vertical page allocation."""
-    _, remaining = resolve_page_heights(
-        draw_geometry,
-        layout_cfg,
-        blocks,
-        f"monitor '{monitor.name}'",
-    )
-    return remaining
-
-
 def generator_context(
     project_root: Path,
     manifest: ModuleManifest,
@@ -2243,6 +2271,7 @@ def generator_context(
 
     return {
         "contract_version": SUPPORTED_MODULE_CONTRACT,
+        "phase": "render",
         "project_root": str(project_root),
         "module_dir": str(manifest.directory),
         "module": {
@@ -2285,6 +2314,7 @@ def generator_context(
             "height_pixels": allocated_height,
             "height_percent": None if nested else block.height_percent,
             "height_remaining": False if nested else block.height_remaining,
+            "height_content": False if nested else block.height_content,
         },
         "spacing": {
             "edge": int(spacing_cfg.get("edge", 0)),
@@ -2456,6 +2486,153 @@ def render_generated_module(
     return root, normalized_entries, css, child_inset, forwarded_click
 
 
+
+def measure_generated_module_height(
+    project_root: Path,
+    manifest: ModuleManifest,
+    instance: str | None,
+    placement_parameters: dict[str, Any],
+    monitor: Monitor,
+    geometry: BarGeometry,
+    waybar_cfg: dict[str, Any],
+    layout_cfg: dict[str, Any],
+    block: LayoutBlock,
+    block_index: int,
+    item_index: int,
+    placement_id: str,
+    allocated_width: int,
+) -> int:
+    """Ask a generated module for its intrinsic height at one allocated width."""
+    if manifest.generator is None:
+        raise SystemExit(
+            f'Module "{manifest.name}" cannot use height="content" because it '
+            "has no generator."
+        )
+
+    context = generator_context(
+        project_root,
+        manifest,
+        instance,
+        placement_parameters,
+        monitor,
+        geometry,
+        waybar_cfg,
+        layout_cfg,
+        block,
+        block_index,
+        item_index,
+        placement_id,
+        allocated_width,
+        1,
+    )
+    context["phase"] = "measure"
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(manifest.generator)],
+            input=json.dumps(context),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.strip()
+        message = (
+            f'Content measurement for module "{manifest.name}" failed on '
+            f'monitor "{monitor.name}"'
+        )
+        if detail:
+            message += f": {detail}"
+        raise SystemExit(message)
+
+    try:
+        measured = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f'Content measurement for module "{manifest.name}" returned invalid '
+            f'JSON on monitor "{monitor.name}": {exc}'
+        )
+
+    if not isinstance(measured, dict):
+        raise SystemExit(
+            f'Content measurement for module "{manifest.name}" must return '
+            "a JSON object."
+        )
+
+    height = measured.get("height")
+    if isinstance(height, bool) or not isinstance(height, int) or height <= 0:
+        raise SystemExit(
+            f'Module "{manifest.name}" does not support height="content": '
+            'measurement must return {"height": <positive integer>}.'
+        )
+
+    return height
+
+
+def measure_page_content_heights(
+    project_root: Path,
+    blocks: list[LayoutBlock],
+    manifests: dict[str, ModuleManifest],
+    monitor: Monitor,
+    geometry: BarGeometry,
+    waybar_cfg: dict[str, Any],
+    layout_cfg: dict[str, Any],
+    app_commands: dict[str, str],
+) -> dict[int, int]:
+    """Measure each top-level height="content" row before flexible allocation."""
+    draw_geometry = calculate_draw_geometry(geometry, layout_cfg)
+    measured: dict[int, int] = {}
+
+    for block_index, block in enumerate(blocks):
+        if not block.height_content:
+            continue
+
+        if block.kind != "row" or len(block.modules) != 1:
+            raise SystemExit(
+                f'page.main item {block_index + 1} height="content" currently '
+                "requires one direct module in a row."
+            )
+
+        module_ref = block.modules[0]
+        if not isinstance(module_ref, LayoutModule):
+            raise SystemExit(
+                f'page.main item {block_index + 1} height="content" currently '
+                "requires one direct module."
+            )
+
+        item_widths = calculate_item_widths(
+            draw_geometry,
+            layout_cfg,
+            block,
+        )
+        allocated_width = item_widths[0]
+        placement_id = f"main-r{block_index + 1}-i1"
+        manifest = manifests[module_ref.name]
+        owner = f"{module_ref.reference}@{placement_id}"
+        placement_parameters = resolve_placement_app_aliases(
+            module_ref.parameters or {},
+            app_commands,
+            owner,
+        )
+
+        measured[block_index] = measure_generated_module_height(
+            project_root,
+            manifest,
+            module_ref.instance,
+            placement_parameters,
+            monitor,
+            geometry,
+            waybar_cfg,
+            layout_cfg,
+            block,
+            block_index + 1,
+            0,
+            placement_id,
+            allocated_width,
+        )
+
+    return measured
+
 def add_entry(
     bar: dict[str, Any],
     entry_name: str,
@@ -2495,11 +2672,22 @@ def build_layout_for_monitor(
     frame_modules: list[str] = []
 
     draw_geometry = calculate_draw_geometry(geometry, layout_cfg)
+    content_heights = measure_page_content_heights(
+        project_root,
+        blocks,
+        manifests,
+        monitor,
+        geometry,
+        waybar_cfg,
+        layout_cfg,
+        app_commands,
+    )
     page_heights, _ = resolve_page_heights(
         draw_geometry,
         layout_cfg,
         blocks,
         f"monitor '{monitor.name}'",
+        content_heights,
     )
 
     def render_placement(
@@ -3038,6 +3226,7 @@ def generate_waybar_config(
         blocks = list(slot_layout.blocks)
 
         geometry = calculate_geometry(monitor, waybar_cfg)
+        bar_height = geometry.inner_height + (2 * geometry.border_width)
         bar_name = f"sidebar-{css_safe(monitor.name)}"
 
         bar: dict[str, Any] = {
@@ -3047,6 +3236,7 @@ def generate_waybar_config(
             "position": position,
             "exclusive": bool(bar_cfg.get("exclusive", True)),
             "width": geometry.width,
+            "height": bar_height,
             "spacing": 0,
             "expand-left": True,
             "no-center": True,
@@ -3169,13 +3359,7 @@ def generate_core_css(
             ]
         )
 
-        validate_vertical_layout(
-            monitor,
-            draw_geometry,
-            layout_cfg,
-            blocks,
-        )
-
+        # Vertical allocation is validated while building each monitor layout.
         # Exact row/col group and spacer geometry is emitted while
         # building each monitor layout, because nested containers need the
         # same recursive mechanism.
@@ -3239,9 +3423,12 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 def print_summary(
+    project_root: Path,
     monitors: list[Monitor],
     waybar_cfg: dict[str, Any],
     slot_layouts: dict[int, SlotLayout],
+    manifests: dict[str, ModuleManifest],
+    app_commands: dict[str, str],
 ) -> None:
     print("Hypr Sidebar generation plan")
     print()
@@ -3284,11 +3471,22 @@ def print_summary(
 
         geometry = calculate_geometry(monitor, waybar_cfg)
         draw_geometry = calculate_draw_geometry(geometry, layout_cfg)
+        content_heights = measure_page_content_heights(
+            project_root,
+            blocks,
+            manifests,
+            monitor,
+            geometry,
+            waybar_cfg,
+            layout_cfg,
+            app_commands,
+        )
         resolved_heights, remaining_height = resolve_page_heights(
             draw_geometry,
             layout_cfg,
             blocks,
             f"monitor '{monitor.name}'",
+            content_heights,
         )
 
         print(
@@ -3321,6 +3519,8 @@ def print_summary(
 
             if page_item.height is not None:
                 height = f"{page_item.height}px"
+            elif page_item.height_content:
+                height = f"content; {resolved_height}px"
             elif page_item.height_percent is not None:
                 height = (
                     f"{page_item.height_percent:g}% of flexible height; "
@@ -3418,9 +3618,12 @@ def main() -> int:
     )
 
     print_summary(
+        project_root,
         monitors,
         waybar_cfg,
         slot_layouts,
+        manifests,
+        app_commands,
     )
 
     config_text = json.dumps(generated_config, indent=2) + "\n"

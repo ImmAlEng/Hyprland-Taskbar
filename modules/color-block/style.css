@@ -1,6 +1,6 @@
 /*
  * color-block
  *
- * Geometry is owned by the layout core.
- * This module only paints the area allocated to it.
+ * Geometry and color are generated per placement.
+ * The module must not request space beyond its allocated rectangle.
  */

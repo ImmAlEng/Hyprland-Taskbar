@@ -7,12 +7,12 @@ pad_y = 13
 [[page.main.item]]
 type = "row"
 modules = ["current-workspace"]
-height_percent = 3
+height = 15
 
 [[page.main.item]]
 type = "row"
 modules = ["workspace-tiles"]
-height = "content"
+height = 146
 
 [[page.main.item]]
 type = "row"
@@ -30,7 +30,7 @@ modules = [
     { module = "box", border = 0, child = { module = "audio-toggle", target = "source" } },
 ]
 item_widths_percent = [12, 64, 12, 12]
-height_percent = 4
+height = 32
 
 [[page.main.item]]
 type = "row"
@@ -41,12 +41,12 @@ modules = [
     { module = "box", border = 0, child = { module = "textbox", text = "VPN" } },
 ]
 item_widths_percent = [25, 25, 25, 25]
-height_percent = 4
+height = 32
 
 [[page.main.item]]
 type = "row"
 modules = [
     { module = "clock" },
 ]
-height_percent = 3
+height = 30
 

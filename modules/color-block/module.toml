@@ -1,14 +1,7 @@
 [module]
 name = "color-block"
 version = 1
-description = "Fills its allocated layout area with a configured color."
-style = "style.css"
+description = "Solid color block with named presets or placement-defined hex colors."
 
 [generator]
 entrypoint = "scripts/generate.py"
-
-[dependencies]
-commands = ["python3"]
-
-[dependencies.arch]
-packages = ["python"]
